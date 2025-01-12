@@ -101,24 +101,30 @@ pub const PowerProfiles = struct {
         return result.toOwnedSlice();
     }
 
-    pub fn enablePerformanceMode(self: *PowerProfiles) !void {
-        if (!self.has_performance) {
-            std.log.warn("Performance mode not available", .{});
-            return;
-        }
-
-        if (self.original_profile == null) {
-            self.original_profile = try self.dbus.getProperty("ActiveProfile");
-        }
-
-        try self.dbus.setProperty("ActiveProfile", "performance");
-    }
-
-    pub fn disablePerformanceMode(self: *PowerProfiles) !void {
+    pub fn enablePerformanceMode(self: *PowerProfiles) void {
         if (!self.has_performance) return;
 
+        if (self.dbus.getProperty("ActiveProfile")) |profile| {
+            defer self.allocator.free(profile);
+            if (!std.mem.eql(u8, profile, "performance")) {
+                self.original_profile = self.allocator.dupe(u8, profile) catch |err| {
+                    std.log.err("Failed to store original power profile: {}", .{err});
+                    return;
+                };
+                self.dbus.setProperty("ActiveProfile", "performance") catch |err| {
+                    std.log.err("Failed to set performance mode: {}", .{err});
+                };
+            }
+        } else |err| {
+            std.log.err("Failed to get active power profile: {}", .{err});
+        }
+    }
+
+    pub fn disablePerformanceMode(self: *PowerProfiles) void {
         if (self.original_profile) |profile| {
-            try self.dbus.setProperty("ActiveProfile", profile);
+            self.dbus.setProperty("ActiveProfile", profile) catch |err| {
+                std.log.err("Failed to restore power profile: {}", .{err});
+            };
             self.allocator.free(profile);
             self.original_profile = null;
         }

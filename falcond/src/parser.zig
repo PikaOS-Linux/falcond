@@ -236,6 +236,20 @@ pub fn Parser(comptime T: type) type {
                                     }
                                 }
                             },
+                            .optional => |opt_info| {
+                                switch (@typeInfo(opt_info.child)) {
+                                    .@"enum" => {
+                                        const ident = try self.parseIdentifier();
+                                        inline for (std.meta.fields(opt_info.child)) |enum_field| {
+                                            if (std.mem.eql(u8, ident, enum_field.name)) {
+                                                @field(result, field.name) = @field(opt_info.child, enum_field.name);
+                                                break;
+                                            }
+                                        }
+                                    },
+                                    else => return error.InvalidSyntax,
+                                }
+                            },
                             .pointer => |ptr_info| {
                                 if (ptr_info.size != .Slice) return error.InvalidSyntax;
                                 switch (ptr_info.child) {

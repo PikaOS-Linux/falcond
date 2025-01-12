@@ -18,7 +18,7 @@ pub const Profile = struct {
     name: []const u8,
     performance_mode: bool = false,
     scx_sched: scx_scheds.ScxScheduler = .none,
-    scx_sched_props: scx_scheds.ScxSchedModes = .gaming,
+    scx_sched_props: ?scx_scheds.ScxSchedModes = null,
     vcache_mode: vcache_setting.VCacheMode = .cache,
 
     pub fn matches(self: *const Profile, process_name: []const u8) bool {
@@ -67,6 +67,7 @@ pub const ProfileManager = struct {
         "REDEngineErrorReporter.exe",
         "REDprelauncher.exe",
         "SteamService.exe",
+        "UnityCrashHandler64.exe",
         "start.exe",
     };
 
@@ -88,25 +89,26 @@ pub const ProfileManager = struct {
 
             if (profile.performance_mode and self.power_profiles.isPerformanceAvailable()) {
                 std.log.info("Enabling performance mode for profile: {s}", .{profile.name});
-                try self.power_profiles.enablePerformanceMode();
+                self.power_profiles.enablePerformanceMode();
             }
 
             const effective_mode = if (self.config.vcache_mode != .none)
                 self.config.vcache_mode
             else
                 profile.vcache_mode;
-            try vcache_setting.applyVCacheMode(effective_mode);
+            vcache_setting.applyVCacheMode(effective_mode);
 
-            // Apply scheduler settings, using global config override if set
             const effective_sched = if (self.config.scx_sched != .none)
                 self.config.scx_sched
             else
                 profile.scx_sched;
-            const effective_sched_mode = if (self.config.scx_sched != .none)
+
+            const effective_scx_mode = if (self.config.scx_sched != .none)
                 self.config.scx_sched_props
             else
                 profile.scx_sched_props;
-            try scx_scheds.applyScheduler(self.allocator, effective_sched, effective_sched_mode);
+
+            scx_scheds.applyScheduler(self.allocator, effective_sched, effective_scx_mode);
         } else {
             std.log.info("Queueing profile: {s} (active: {s})", .{ profile.name, self.active_profile.?.name });
             try self.queued_profiles.append(profile);
@@ -120,12 +122,11 @@ pub const ProfileManager = struct {
 
             if (profile.performance_mode) {
                 std.log.info("Disabling performance mode for profile: {s}", .{profile.name});
-                try self.power_profiles.disablePerformanceMode();
+                self.power_profiles.disablePerformanceMode();
             }
 
-            try vcache_setting.applyVCacheMode(.none);
-            try scx_scheds.restorePreviousState(self.allocator);
-
+            vcache_setting.applyVCacheMode(.none);
+            scx_scheds.restorePreviousState(self.allocator);
             if (self.queued_profiles.items.len > 0) {
                 const next_profile = self.queued_profiles.orderedRemove(0);
                 std.log.info("Activating next queued profile: {s}", .{next_profile.name});
@@ -256,7 +257,7 @@ pub const ProfileManager = struct {
     pub fn deinit(self: *ProfileManager) void {
         if (self.active_profile) |profile| {
             if (profile.performance_mode) {
-                self.power_profiles.disablePerformanceMode() catch {};
+                self.power_profiles.disablePerformanceMode();
             }
         }
 

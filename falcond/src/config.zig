@@ -7,7 +7,7 @@ const scx_scheds = @import("scx_scheds.zig");
 pub const Config = struct {
     enable_performance_mode: bool = true,
     scx_sched: scx_scheds.ScxScheduler = .none,
-    scx_sched_props: scx_scheds.ScxSchedModes = .gaming,
+    scx_sched_props: ?scx_scheds.ScxSchedModes = null,
     vcache_mode: vcache_setting.VCacheMode = .none,
 
     pub fn load(allocator: std.mem.Allocator) !Config {
@@ -46,7 +46,6 @@ pub const Config = struct {
 
         try file.writer().print("enable_performance_mode = {}\n", .{self.enable_performance_mode});
         try file.writer().print("scx_sched = {s}\n", .{@tagName(self.scx_sched)});
-        try file.writer().print("scx_sched_props = {s}\n", .{@tagName(self.scx_sched_props)});
         try file.writer().print("vcache_mode = {s}\n", .{@tagName(self.vcache_mode)});
     }
 };

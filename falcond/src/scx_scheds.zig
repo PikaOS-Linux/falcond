@@ -49,6 +49,7 @@ pub const ScxScheduler = enum {
         if (std.mem.eql(u8, str, "scx_simple")) return .simple;
         if (std.mem.eql(u8, str, "scx_userland")) return .userland;
         if (std.mem.eql(u8, str, "scx_vder")) return .vder;
+
         return error.InvalidValue;
     }
 };
@@ -61,13 +62,13 @@ pub const ScxSchedModes = enum {
     server,
 };
 
-const PreviousState = struct {
+const State = struct {
     scheduler: ?ScxScheduler = null,
     mode: ?ScxSchedModes = null,
 };
 
-var previous_state: PreviousState = .{};
-var supported_schedulers: []ScxScheduler = undefined;
+var previous_state = State{};
+var supported_schedulers: []ScxScheduler = &[_]ScxScheduler{};
 var allocator: std.mem.Allocator = undefined;
 
 pub fn init(alloc: std.mem.Allocator) !void {
@@ -182,10 +183,19 @@ pub fn storePreviousState(alloc: std.mem.Allocator) !void {
     }
 }
 
-pub fn activateScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ScxSchedModes) ScxError!void {
+fn isSchedulerSupported(scheduler: ScxScheduler) bool {
+    if (scheduler == .none) return true;
+
+    for (supported_schedulers) |s| {
+        if (s == scheduler) return true;
+    }
+    return false;
+}
+
+pub fn activateScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ?ScxSchedModes) ScxError!void {
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
 
-    const mode_str = try std.fmt.allocPrint(alloc, "{d}", .{modeToInt(mode)});
+    const mode_str = try std.fmt.allocPrint(alloc, "{d}", .{modeToInt(mode orelse .default)});
     defer alloc.free(mode_str);
 
     const args = [_][]const u8{
@@ -197,11 +207,33 @@ pub fn activateScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode
     try dbus_conn.callMethod("SwitchScheduler", &args);
 }
 
-pub fn applyScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ScxSchedModes) ScxError!void {
-    std.log.info("Applying scheduler {s} with mode {s}", .{ scheduler.toScxName(), @tagName(mode) });
+pub fn applyScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ?ScxSchedModes) void {
+    storePreviousState(alloc) catch |err| {
+        std.log.err("Failed to store previous state: {}", .{err});
+    };
 
-    try storePreviousState(alloc);
-    try activateScheduler(alloc, scheduler, mode);
+    if (scheduler == .none) {
+        std.log.info("No scheduler to apply for this profile", .{});
+        deactivateScheduler(alloc) catch |err| {
+            std.log.err("Failed to deactivate scheduler: {}", .{err});
+        };
+        return;
+    }
+
+    if (!isSchedulerSupported(scheduler)) {
+        std.log.info("Scheduler {s} not supported by system", .{scheduler.toScxName()});
+        return;
+    }
+
+    if (mode) |m| {
+        std.log.info("Applying scheduler {s} with mode {s}", .{ scheduler.toScxName(), @tagName(m) });
+    } else {
+        std.log.info("Applying scheduler {s} with default mode", .{scheduler.toScxName()});
+    }
+
+    activateScheduler(alloc, scheduler, mode orelse .default) catch |err| {
+        std.log.err("Failed to activate scheduler {s}: {}", .{ scheduler.toScxName(), err });
+    };
 }
 
 pub fn deactivateScheduler(alloc: std.mem.Allocator) ScxError!void {
@@ -209,16 +241,20 @@ pub fn deactivateScheduler(alloc: std.mem.Allocator) ScxError!void {
     try dbus_conn.callMethod("StopScheduler", &[_][]const u8{});
 }
 
-pub fn restorePreviousState(alloc: std.mem.Allocator) ScxError!void {
+pub fn restorePreviousState(alloc: std.mem.Allocator) void {
     if (previous_state.scheduler) |scheduler| {
-        if (scheduler == .none) {
-            std.log.info("Previous state was none, stopping scheduler", .{});
-            try deactivateScheduler(alloc);
-        } else {
-            std.log.info("Restoring previous scheduler: {s}", .{scheduler.toScxName()});
-            try activateScheduler(alloc, scheduler, previous_state.mode orelse .default);
+        if (previous_state.mode) |mode| {
+            std.log.info("Restoring previous scheduler {s} with mode {s}", .{ scheduler.toScxName(), @tagName(mode) });
+            activateScheduler(alloc, scheduler, mode) catch |err| {
+                std.log.err("Failed to restore previous scheduler: {}", .{err});
+            };
         }
         previous_state.scheduler = null;
         previous_state.mode = null;
+    } else {
+        std.log.info("Previous state was none, stopping scheduler", .{});
+        deactivateScheduler(alloc) catch |err| {
+            std.log.err("Failed to stop scheduler: {}", .{err});
+        };
     }
 }
