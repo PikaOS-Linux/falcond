@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: ferreo <ferreo@pika-os.com>
 Rules-Requires-Root: no
 Build-Depends:
- debhelper-compat (= 13), zig-nightly, libdbus-1-dev, dh-systemd, git
+ debhelper-compat (= 13), zig-nightly, git
 Standards-Version: 4.6.1
 Homepage: https://pika-os.com
 
@@ -12,9 +12,7 @@ Package: falcond
 Architecture: amd64
 Depends: ${misc:Depends},
          ${shlibs:Depends},
-         util-linux,
          power-profiles-daemon | tuned-ppd,
-         scx,
-         systemd
+         scx
 Provides: falcond
 Description: Accelerate your gaming experience with falcond, auto setting scx, vcache and choosing performance profiles
