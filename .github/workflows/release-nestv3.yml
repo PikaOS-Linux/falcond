@@ -1,0 +1,40 @@
+name: PikaOS Package Build & Release (amd64-v3)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/release-nest-v3'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/pikaos-linux/pikaos-builder:nestv3
+      volumes:
+        - /proc:/proc
+      options: --privileged -it
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install SSH key
+      uses: shimataro/ssh-key-action@v2
+      with:
+        key: ${{ secrets.SSH_KEY }}
+        name: id_rsa
+        known_hosts: ${{ secrets.KNOWN_HOSTS }}
+        if_key_exists: replace
+    
+    - name: Update APT Cache
+      run: apt-get update -y
+
+    - name: Set Build Config
+      run: cp -vf ./pika-build-config/amd64-v3.sh ./pika-build-config.sh
+
+    - name: Build Package
+      run: ./main.sh
+
+    - name: Release Package
+      run: ./release.sh

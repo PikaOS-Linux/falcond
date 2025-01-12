@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+
+# See debhelper(7) (uncomment to enable).
+# Output every command that modifies files on the build system.
+export DH_VERBOSE = 1
+
+%:
+	dh $@ --with=systemd
+
+override_dh_dwz:
+	echo "disabled"
+
+override_dh_auto_build:
+	zig build-exe src/main.zig -O ReleaseFast -mcpu x86_64_v3 --name falcond
+	# Clone profiles repository
+	rm -rf falcond-profiles
+	git clone https://github.com/PikaOS-Linux/falcond-profiles.git
+
+override_dh_install:
+	dh_install
+	mkdir -p debian/falcond/usr/bin/
+	mkdir -p debian/falcond/usr/share/falcond/
+	cp -vf falcond debian/falcond/usr/bin/
+	chmod 755 debian/falcond/usr/bin/falcond
+	chmod +x debian/falcond/usr/bin/falcond
+	# Copy profiles
+	cp -r falcond-profiles/usr/share/falcond/profiles debian/falcond/usr/share/falcond/
+
+override_dh_installsystemd:
+	dh_installsystemd --name=falcond
+
+override_dh_clean:
+	dh_clean
+	rm -rf falcond-profiles
