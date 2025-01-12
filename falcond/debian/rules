@@ -27,7 +27,7 @@ override_dh_install:
 	cp -r falcond-profiles/usr/share/falcond/profiles debian/falcond/usr/share/falcond/
 
 override_dh_installsystemd:
-	dh_installsystemd --name=falcond
+	dh_installsystemd --name=falcond --restart-after-upgrade
 
 override_dh_clean:
 	dh_clean
