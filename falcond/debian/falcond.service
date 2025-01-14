@@ -1,6 +1,6 @@
 [Unit]
 Description=Falcon Daemon Service
-After=network.target
+After=multi-user.target
 Wants=graphical.target
 
 [Service]
