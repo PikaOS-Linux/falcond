@@ -1,6 +1,6 @@
 const std = @import("std");
-const dbus = @import("dbus.zig");
-const Config = @import("config.zig").Config;
+const dbus = @import("./dbus.zig");
+const Config = @import("../config/config.zig").Config;
 
 pub const PowerProfiles = struct {
     const PP_NAME = "org.freedesktop.UPower.PowerProfiles";
@@ -9,11 +9,11 @@ pub const PowerProfiles = struct {
 
     allocator: std.mem.Allocator,
     dbus: dbus.DBus,
-    config: *Config,
+    config: Config,
     original_profile: ?[]const u8,
     has_performance: bool,
 
-    pub fn init(allocator: std.mem.Allocator, config: *Config) !*PowerProfiles {
+    pub fn init(allocator: std.mem.Allocator, config: Config) !*PowerProfiles {
         var self = try allocator.create(PowerProfiles);
         errdefer allocator.destroy(self);
 
@@ -107,6 +107,7 @@ pub const PowerProfiles = struct {
         if (self.dbus.getProperty("ActiveProfile")) |profile| {
             defer self.allocator.free(profile);
             if (!std.mem.eql(u8, profile, "performance")) {
+                std.log.info("Storing original power profile: {s}", .{profile});
                 self.original_profile = self.allocator.dupe(u8, profile) catch |err| {
                     std.log.err("Failed to store original power profile: {}", .{err});
                     return;
@@ -122,6 +123,7 @@ pub const PowerProfiles = struct {
 
     pub fn disablePerformanceMode(self: *PowerProfiles) void {
         if (self.original_profile) |profile| {
+            std.log.info("Restoring power profile to: {s}", .{profile});
             self.dbus.setProperty("ActiveProfile", profile) catch |err| {
                 std.log.err("Failed to restore power profile: {}", .{err});
             };

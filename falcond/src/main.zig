@@ -1,7 +1,5 @@
 const std = @import("std");
 const Daemon = @import("daemon.zig").Daemon;
-const Config = @import("config.zig").Config;
-const PowerProfiles = @import("power_profiles.zig").PowerProfiles;
 
 pub const std_options = std.Options{
     .log_level = .debug,
@@ -80,16 +78,6 @@ pub fn main() !void {
         },
     };
 
-    var config = try Config.load(allocator);
-    var power_profiles = try PowerProfiles.init(allocator, &config);
-    defer power_profiles.deinit();
-
-    if (!power_profiles.isPerformanceAvailable()) {
-        std.log.warn("Performance profile not available - power profile management disabled", .{});
-    } else {
-        std.log.info("Performance profile available - power profile management enabled", .{});
-    }
-
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
@@ -97,7 +85,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "--oneshot")) break true;
     } else false;
 
-    var daemon = try Daemon.init(allocator, &config, oneshot, power_profiles);
+    var daemon = try Daemon.init(allocator, "/etc/falcond/config.conf", oneshot);
     defer daemon.deinit();
 
     try daemon.run();

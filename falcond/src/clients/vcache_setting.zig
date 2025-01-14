@@ -14,7 +14,10 @@ var previous_mode_buffer: [10]u8 = undefined;
 
 pub fn applyVCacheMode(vcache_mode: VCacheMode) void {
     const file = fs.openFileAbsolute(vcache_path, .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => return,
+        error.FileNotFound => {
+            std.log.info("AMD 3D vcache support not detected", .{});
+            return;
+        },
         else => {
             std.log.err("Failed to open vcache file: {}", .{err});
             return;
@@ -24,6 +27,7 @@ pub fn applyVCacheMode(vcache_mode: VCacheMode) void {
 
     if (vcache_mode == .none) {
         if (previous_mode) |mode| {
+            std.log.info("Restoring previous vcache mode: {s}", .{mode});
             file.writeAll(mode) catch |err| {
                 std.log.err("Failed to restore previous vcache mode: {}", .{err});
             };
@@ -50,6 +54,8 @@ pub fn applyVCacheMode(vcache_mode: VCacheMode) void {
         .cache => "cache",
         .none => unreachable,
     };
+
+    std.log.info("Setting vcache mode to: {s}", .{mode_str});
     file.writeAll(mode_str) catch |err| {
         std.log.err("Failed to write vcache mode: {}", .{err});
     };

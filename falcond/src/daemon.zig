@@ -1,34 +1,150 @@
 const std = @import("std");
-const ProfileManager = @import("profile.zig").ProfileManager;
-const Profile = @import("profile.zig").Profile;
-const Config = @import("config.zig").Config;
+const ProfileManager = @import("profile/manager.zig").ProfileManager;
+const Profile = @import("profile/types.zig").Profile;
+const ProfileLoader = @import("profile/loader.zig");
+const Config = @import("config/config.zig").Config;
 const linux = std.os.linux;
 const posix = std.posix;
-const PowerProfiles = @import("power_profiles.zig").PowerProfiles;
-const scx_scheds = @import("scx_scheds.zig");
+const PowerProfiles = @import("clients/power_profiles.zig").PowerProfiles;
+const scx_scheds = @import("clients/scx_scheds.zig");
 
 pub const Daemon = struct {
     allocator: std.mem.Allocator,
+    config_path: []const u8,
     profile_manager: ProfileManager,
     oneshot: bool,
     known_pids: ?std.AutoHashMap(u32, *const Profile),
     power_profiles: *PowerProfiles,
+    performance_mode: bool,
+    last_profiles_check: i128,
+    last_config_check: i128,
+    config: Config,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config: ?*Config, oneshot: bool, power_profiles: *PowerProfiles) !Self {
-        var profile_manager = ProfileManager.init(allocator, power_profiles, config.?);
-        try profile_manager.loadProfiles(oneshot);
+    pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool) !*Self {
+        const config_path_owned = try allocator.dupe(u8, config_path);
+        errdefer allocator.free(config_path_owned);
 
+        const config = try Config.load(allocator, config_path);
+        const power_profiles = try PowerProfiles.init(allocator, config);
+        errdefer power_profiles.deinit();
+
+        const performance_mode = power_profiles.isPerformanceAvailable();
+        if (performance_mode) {
+            std.log.info("Performance profile available - power profile management enabled", .{});
+        }
+
+        var profile_manager = ProfileManager.init(allocator, power_profiles, config);
+        try ProfileLoader.loadProfiles(allocator, &profile_manager.profiles, &profile_manager.proton_profile, oneshot);
+
+        const current_time = std.time.nanoTimestamp();
         try scx_scheds.init(allocator);
 
-        return Self{
+        const self = try allocator.create(Self);
+        self.* = .{
             .allocator = allocator,
             .profile_manager = profile_manager,
             .oneshot = oneshot,
-            .known_pids = null,
+            .known_pids = if (!oneshot) std.AutoHashMap(u32, *const Profile).init(allocator) else null,
             .power_profiles = power_profiles,
+            .last_profiles_check = current_time,
+            .last_config_check = current_time,
+            .config = config,
+            .config_path = config_path_owned,
+            .performance_mode = performance_mode,
         };
+
+        return self;
+    }
+
+    pub fn deinit(self: *Self) void {
+        scx_scheds.deinit();
+        self.profile_manager.deinit();
+        self.power_profiles.deinit();
+        if (self.known_pids) |*map| {
+            map.deinit();
+        }
+        self.config.deinit();
+        self.allocator.free(self.config_path);
+        self.allocator.destroy(self);
+    }
+
+    fn reloadConfig(self: *Self) !void {
+        if (self.known_pids) |*map| {
+            map.clearRetainingCapacity();
+        }
+
+        const config = try Config.load(self.allocator, self.config_path);
+        const power_profiles = try PowerProfiles.init(self.allocator, config);
+        self.power_profiles.deinit();
+        self.config.deinit();
+        self.config = config;
+        self.power_profiles = power_profiles;
+        self.performance_mode = self.power_profiles.isPerformanceAvailable();
+
+        var profile_manager = ProfileManager.init(self.allocator, power_profiles, config);
+        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot);
+        self.profile_manager.deinit();
+        self.profile_manager = profile_manager;
+    }
+
+    fn checkConfigChanges(self: *Self) !bool {
+        const stat = try std.fs.cwd().statFile(self.config_path);
+        const mtime = @as(i128, @intCast(stat.mtime));
+        if (mtime > self.last_config_check) {
+            std.log.info("Config file changed, reloading profiles", .{});
+            self.last_config_check = std.time.nanoTimestamp();
+            return true;
+        }
+        return false;
+    }
+
+    fn checkProfilesChanges(self: *Self) !bool {
+        var dir = try std.fs.cwd().openDir(self.profile_manager.profiles_dir, .{ .iterate = true });
+        defer dir.close();
+
+        var latest_mtime: i128 = self.last_profiles_check;
+        var file_count: usize = 0;
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file) {
+                file_count += 1;
+                const stat = try dir.statFile(entry.name);
+                const mtime = @as(i128, @intCast(stat.mtime));
+                if (mtime > latest_mtime) {
+                    latest_mtime = mtime;
+                }
+            }
+        }
+
+        if (latest_mtime > self.last_profiles_check or file_count != self.profile_manager.profiles.items.len) {
+            std.log.info("Profile changes detected, reloading profiles", .{});
+            self.last_profiles_check = std.time.nanoTimestamp();
+            return true;
+        }
+
+        return false;
+    }
+
+    pub fn run(self: *Self) !void {
+        if (self.oneshot) {
+            try self.handleProcesses();
+            return;
+        }
+
+        while (true) {
+            const config_changed = try self.checkConfigChanges();
+            const profiles_changed = try self.checkProfilesChanges();
+
+            if (config_changed or profiles_changed) {
+                try self.reloadConfig();
+            }
+
+            try self.handleProcesses();
+
+            std.time.sleep(std.time.ns_per_s * 9);
+        }
     }
 
     fn scanProcesses(allocator: std.mem.Allocator) !std.AutoHashMap(u32, []const u8) {
@@ -91,7 +207,7 @@ pub const Daemon = struct {
         return try allocator.dupe(u8, exe_name);
     }
 
-    pub fn checkProcesses(self: *Self) !void {
+    fn handleProcesses(self: *Self) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
@@ -113,14 +229,16 @@ pub const Daemon = struct {
             if (!self.oneshot) {
                 if (self.known_pids) |*known| {
                     if (!known.contains(pid)) {
-                        if (try self.profile_manager.matchProcess(arena.allocator(), try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name)) |profile| {
+                        if (try self.profile_manager.matchProcess(arena_allocator, try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name)) |profile| {
                             try known.put(pid, profile);
                             try self.profile_manager.activateProfile(profile);
                         }
                     }
                 }
             } else {
-                try self.handleProcess(try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name);
+                if (try self.profile_manager.matchProcess(arena_allocator, try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name)) |profile| {
+                    try self.profile_manager.activateProfile(profile);
+                }
             }
         }
 
@@ -130,81 +248,30 @@ pub const Daemon = struct {
                 while (known_it.next()) |entry| {
                     const pid = entry.key_ptr.*;
                     if (!processes.contains(pid)) {
-                        try self.handleProcessExit(try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}));
-                    }
-                }
-            }
-        }
-    }
+                        const profile = entry.value_ptr.*;
+                        var found_profile = false;
 
-    pub fn run(self: *Self) !void {
-        if (!self.oneshot) {
-            self.known_pids = std.AutoHashMap(u32, *const Profile).init(self.allocator);
-        }
-
-        try self.checkProcesses();
-
-        if (self.oneshot) {
-            return;
-        }
-
-        while (true) {
-            try self.checkProcesses();
-            std.time.sleep(std.time.ns_per_s * 3);
-        }
-    }
-
-    pub fn deinit(self: *Self) void {
-        scx_scheds.deinit();
-        if (self.known_pids) |*pids| {
-            pids.deinit();
-        }
-        self.profile_manager.deinit();
-    }
-
-    pub fn handleProcess(self: *Self, pid: []const u8, process_name: []const u8) !void {
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-
-        if (try self.profile_manager.matchProcess(arena.allocator(), pid, process_name)) |profile| {
-            if (!self.oneshot) {
-                if (self.known_pids) |*known| {
-                    try known.put(try std.fmt.parseInt(u32, pid, 10), profile);
-                }
-            }
-            try self.profile_manager.activateProfile(profile);
-        }
-    }
-
-    pub fn handleProcessExit(self: *Self, pid: []const u8) !void {
-        if (self.known_pids) |*pids| {
-            const pid_num = std.fmt.parseInt(u32, pid, 10) catch |err| {
-                std.log.warn("Failed to parse PID: {}", .{err});
-                return;
-            };
-
-            if (pids.get(pid_num)) |profile| {
-                var found_profile = false;
-
-                if (self.profile_manager.active_profile) |active| {
-                    if (active == profile) {
-                        std.log.info("Process {s} has terminated", .{profile.name});
-                        try self.profile_manager.deactivateProfile(active);
-                        found_profile = true;
-                    }
-                }
-
-                if (!found_profile) {
-                    for (self.profile_manager.queued_profiles.items, 0..) |queued, i| {
-                        if (queued == profile) {
-                            std.log.info("Process {s} has terminated", .{profile.name});
-                            _ = self.profile_manager.queued_profiles.orderedRemove(i);
-                            break;
+                        if (self.profile_manager.active_profile) |active| {
+                            if (active == profile) {
+                                std.log.info("Process {s} has terminated", .{profile.name});
+                                try self.profile_manager.deactivateProfile(active);
+                                found_profile = true;
+                            }
                         }
+
+                        if (!found_profile) {
+                            for (self.profile_manager.queued_profiles.items, 0..) |queued, i| {
+                                if (queued == profile) {
+                                    std.log.info("Process {s} has terminated", .{profile.name});
+                                    _ = self.profile_manager.queued_profiles.orderedRemove(i);
+                                    break;
+                                }
+                            }
+                        }
+
+                        _ = known.remove(pid);
                     }
                 }
-
-                _ = pids.remove(pid_num);
             }
         }
     }

@@ -1,5 +1,5 @@
 const std = @import("std");
-const dbus = @import("dbus.zig");
+const dbus = @import("./dbus.zig");
 
 pub const ScxError = dbus.DBusError;
 

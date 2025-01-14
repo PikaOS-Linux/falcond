@@ -142,6 +142,43 @@ pub fn Parser(comptime T: type) type {
             return error.InvalidSyntax;
         }
 
+        fn parseStringArray(self: *Self) ![]const []const u8 {
+            if (self.pos >= self.content.len or self.content[self.pos] != '[')
+                return error.InvalidSyntax;
+
+            self.pos += 1;
+            var values = std.ArrayList([]const u8).init(self.allocator);
+            errdefer {
+                for (values.items) |str| {
+                    self.allocator.free(str);
+                }
+                values.deinit();
+            }
+
+            while (self.pos < self.content.len) {
+                self.skipWhitespace();
+                if (self.content[self.pos] == ']') {
+                    self.pos += 1;
+                    return values.toOwnedSlice();
+                }
+
+                const str = try self.parseString();
+                try values.append(str);
+
+                self.skipWhitespace();
+                if (self.content[self.pos] == ',') {
+                    self.pos += 1;
+                    continue;
+                }
+                if (self.content[self.pos] == ']') {
+                    self.pos += 1;
+                    return values.toOwnedSlice();
+                }
+                return error.InvalidSyntax;
+            }
+            return error.InvalidSyntax;
+        }
+
         fn parseIdentifier(self: *Self) ![]const u8 {
             const start = self.pos;
             const v_size = std.simd.suggestVectorLength(u8) orelse 32;
@@ -258,6 +295,9 @@ pub fn Parser(comptime T: type) type {
                                     },
                                     i64 => {
                                         @field(result, field.name) = try self.parseArray();
+                                    },
+                                    []const u8 => {
+                                        @field(result, field.name) = try self.parseStringArray();
                                     },
                                     else => return error.InvalidSyntax,
                                 }

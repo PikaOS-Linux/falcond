@@ -34,7 +34,6 @@ pub const DBusError = error{
     NetworkSubsystemFailed,
 };
 
-/// Simple DBus interface that uses busctl under the hood
 pub const DBus = struct {
     allocator: std.mem.Allocator,
     bus_name: []const u8,
