@@ -27,6 +27,9 @@ const default_system_processes = [_][]const u8{
     "SteamService.exe",
     "UnityCrashHandler64.exe",
     "start.exe",
+    "CrashReportClient.exe",
+    "Battle.net.exe",
+    "Agent.exe",
 };
 
 pub const Config = struct {
@@ -82,7 +85,7 @@ pub const Config = struct {
         try file.writer().print("enable_performance_mode = {}\n", .{self.enable_performance_mode});
         try file.writer().print("scx_sched = {s}\n", .{@tagName(self.scx_sched)});
         try file.writer().print("vcache_mode = {s}\n", .{@tagName(self.vcache_mode)});
-        
+
         try file.writer().print("system_processes = [\n", .{});
         for (self.system_processes) |proc| {
             try file.writer().print("  \"{s}\",\n", .{proc});
