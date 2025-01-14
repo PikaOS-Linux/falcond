@@ -75,17 +75,21 @@ pub const Daemon = struct {
             map.clearRetainingCapacity();
         }
 
-        const config = try Config.load(self.allocator, self.config_path);
-        const power_profiles = try PowerProfiles.init(self.allocator, config);
+        if (self.profile_manager.active_profile != null) {
+            try self.profile_manager.unloadProfile(self.profile_manager.active_profile.?);
+        }
+
+        self.profile_manager.deinit();
         self.power_profiles.deinit();
         self.config.deinit();
+
+        const config = try Config.load(self.allocator, self.config_path);
+        const power_profiles = try PowerProfiles.init(self.allocator, config);
+        var profile_manager = ProfileManager.init(self.allocator, power_profiles, config);
+        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot);
         self.config = config;
         self.power_profiles = power_profiles;
         self.performance_mode = self.power_profiles.isPerformanceAvailable();
-
-        var profile_manager = ProfileManager.init(self.allocator, power_profiles, config);
-        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot);
-        self.profile_manager.deinit();
         self.profile_manager = profile_manager;
     }
 

@@ -34,7 +34,7 @@ pub const ProfileManager = struct {
                 std.log.err("Failed to deactivate profile: {}", .{err});
             };
         }
-        
+
         for (self.profiles.items) |profile| {
             self.allocator.free(profile.name);
         }
@@ -93,6 +93,23 @@ pub const ProfileManager = struct {
                     const next_profile = self.queued_profiles.orderedRemove(0);
                     try self.activateProfile(next_profile);
                 }
+            }
+        }
+    }
+
+    pub fn unloadProfile(self: *ProfileManager, profile: *const Profile) !void {
+        if (self.active_profile) |active| {
+            if (active == profile) {
+                std.log.info("Unloading profile: {s}", .{profile.name});
+
+                if (profile.performance_mode and self.power_profiles.isPerformanceAvailable()) {
+                    std.log.info("Disabling performance mode for profile: {s}", .{profile.name});
+                    self.power_profiles.disablePerformanceMode();
+                }
+
+                vcache_setting.applyVCacheMode(.none);
+                try scx_scheds.deactivateScheduler(self.allocator);
+                self.active_profile = null;
             }
         }
     }

@@ -3,32 +3,6 @@ const types = @import("types.zig");
 const Profile = types.Profile;
 const Config = @import("../config/config.zig").Config;
 
-// Don't match Wine/Proton infrastructure
-// const system_processes = [_][]const u8{
-//     "steam.exe",
-//     "services.exe",
-//     "winedevice.exe",
-//     "plugplay.exe",
-//     "svchost.exe",
-//     "explorer.exe",
-//     "rpcss.exe",
-//     "tabtip.exe",
-//     "wineboot.exe",
-//     "rundll32.exe",
-//     "iexplore.exe",
-//     "conhost.exe",
-//     "crashpad_handler.exe",
-//     "iscriptevaluator.exe",
-//     "VC_redist.x86.exe",
-//     "VC_redist.x64.exe",
-//     "cmd.exe",
-//     "REDEngineErrorReporter.exe",
-//     "REDprelauncher.exe",
-//     "SteamService.exe",
-//     "UnityCrashHandler64.exe",
-//     "start.exe",
-// };
-
 pub fn isProtonParent(arena: std.mem.Allocator, pid: []const u8) !bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const status_path = try std.fmt.bufPrint(&path_buf, "/proc/{s}/status", .{pid});
