@@ -86,7 +86,7 @@ pub const ProfileManager = struct {
                 }
 
                 vcache_setting.applyVCacheMode(.none);
-                try scx_scheds.deactivateScheduler(self.allocator);
+                scx_scheds.restorePreviousState(self.allocator);
                 self.active_profile = null;
 
                 if (self.queued_profiles.items.len > 0) {

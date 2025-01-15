@@ -1,3 +1,9 @@
+falcond (1.0.5-101pika1) pika; urgency=low
+
+  * Fix scx scheduler reactivation + improve info logging - actual fix it this time
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 12 Jan 2025 13:48:00 +0300
+
 falcond (1.0.4-101pika1) pika; urgency=low
 
   * Fix scx scheduler reactivation + improve info logging
