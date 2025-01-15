@@ -15,7 +15,9 @@ var previous_mode_buffer: [10]u8 = undefined;
 pub fn applyVCacheMode(vcache_mode: VCacheMode) void {
     const file = fs.openFileAbsolute(vcache_path, .{ .mode = .read_write }) catch |err| switch (err) {
         error.FileNotFound => {
-            std.log.info("AMD dual CCD 3D vcache support not detected", .{});
+            if (vcache_mode == .none) {
+                std.log.info("AMD dual CCD 3D vcache support not detected", .{});
+            }
             return;
         },
         else => {
