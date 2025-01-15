@@ -1,3 +1,9 @@
+falcond (1.0.3-101pika1) pika; urgency=low
+
+  * Disable ananicy-cpp when scx sched is used, reneable when one is disabled
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 12 Jan 2025 13:48:00 +0300
+
 falcond (1.0.2-101pika1) pika; urgency=low
 
   * Minor fix for race condition during profile reloadings

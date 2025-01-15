@@ -193,6 +193,10 @@ fn isSchedulerSupported(scheduler: ScxScheduler) bool {
 }
 
 pub fn activateScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ?ScxSchedModes) ScxError!void {
+    if (scheduler != .none) {
+        runSystemCtl(alloc, "stop", "ananicy-cpp");
+    }
+
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
 
     const mode_str = try std.fmt.allocPrint(alloc, "{d}", .{modeToInt(mode orelse .default)});
@@ -236,9 +240,30 @@ pub fn applyScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ?
     };
 }
 
+fn runSystemCtl(alloc: std.mem.Allocator, command: []const u8, service: []const u8) void {
+    const argv = [_][]const u8{ "systemctl", command, service };
+    const max_output_size = 1024;
+    const result = std.process.Child.run(.{
+        .allocator = alloc,
+        .argv = &argv,
+        .max_output_bytes = max_output_size,
+    }) catch |err| {
+        std.log.warn("Failed to run systemctl {s} {s}: {}", .{ command, service, err });
+        return;
+    };
+    defer alloc.free(result.stderr);
+    defer alloc.free(result.stdout);
+
+    if (result.term.Exited != 0) {
+        std.log.warn("systemctl failed: {s}", .{result.stderr});
+        return;
+    }
+}
+
 pub fn deactivateScheduler(alloc: std.mem.Allocator) ScxError!void {
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
     try dbus_conn.callMethod("StopScheduler", &[_][]const u8{});
+    runSystemCtl(alloc, "start", "ananicy-cpp");
 }
 
 pub fn restorePreviousState(alloc: std.mem.Allocator) void {
