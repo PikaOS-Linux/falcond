@@ -1,4 +1,4 @@
-falcond (1.0.7-101pika1) pika; urgency=low
+falcond (1.0.7-101pika2) pika; urgency=low
 
   * Don't load profiles in subfolders
 
