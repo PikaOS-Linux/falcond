@@ -111,7 +111,7 @@ This means you can focus on gaming while falcond handles all the technical optim
 
 falcond is released under the [MIT License](http://git.pika-os.com/general-packages/falcond/raw/branch/main/LICENSE).
 
-## Contiributing
+## Contributing
 
 Please fork the [PikaOS-Linux/falcond](https://github.com/PikaOS-Linux/falcond) repository and submit a pull request.
 
