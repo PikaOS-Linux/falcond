@@ -1,3 +1,9 @@
+falcond (1.0.7-101pika1) pika; urgency=low
+
+  * Don't load profiles in subfolders
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 12 Jan 2025 13:48:00 +0300
+
 falcond (1.0.6-101pika1) pika; urgency=low
 
   * Add handheld and htpc profiles, split system processes config to live in the profiles repo for easier updates

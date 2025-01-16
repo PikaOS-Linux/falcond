@@ -30,12 +30,10 @@ pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []c
     var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
     defer dir.close();
 
-    var walker = try dir.walk(allocator);
-    defer walker.deinit();
-
-    while (try walker.next()) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.path, ".conf")) {
-            const path = try std.fs.path.join(allocator, &.{ dir_path, entry.path });
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
+            const path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
             defer allocator.free(path);
 
             const file = try std.fs.openFileAbsolute(path, .{});
