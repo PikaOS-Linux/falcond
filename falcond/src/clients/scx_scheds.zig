@@ -102,8 +102,8 @@ const SCX_IFACE = "org.scx.Loader";
 fn modeToInt(mode: ScxSchedModes) u32 {
     return switch (mode) {
         .default => 0,
-        .power => 1,
-        .gaming => 2,
+        .gaming => 1,
+        .power => 2,
         .latency => 3,
         .server => 4,
     };
@@ -112,8 +112,8 @@ fn modeToInt(mode: ScxSchedModes) u32 {
 fn intToMode(value: u32) ScxError!ScxSchedModes {
     return switch (value) {
         0 => .default,
-        1 => .power,
-        2 => .gaming,
+        1 => .gaming,
+        2 => .power,
         3 => .latency,
         4 => .server,
         else => error.InvalidValue,
