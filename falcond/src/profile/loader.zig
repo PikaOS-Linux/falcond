@@ -2,8 +2,9 @@ const std = @import("std");
 const confloader = @import("../config/confloader.zig");
 const types = @import("types.zig");
 const Profile = types.Profile;
+const ProfileMode = @import("../config/config.zig").ProfileMode;
 
-pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profile), proton_profile: *?*const Profile, oneshot: bool) !void {
+pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profile), proton_profile: *?*const Profile, oneshot: bool, mode: ProfileMode) !void {
     if (oneshot) {
         try profiles.append(Profile{
             .name = try allocator.dupe(u8, "Hades3.exe"),
@@ -19,7 +20,14 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profi
 
         proton_profile.* = &profiles.items[1];
     } else {
-        var loaded_profiles = try confloader.loadConfDir(Profile, allocator, "/usr/share/falcond/profiles");
+        const base_path = "/usr/share/falcond/profiles";
+        const profiles_path = if (mode != .none)
+            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, @tagName(mode) })
+        else
+            base_path;
+        defer if (mode != .none) allocator.free(profiles_path);
+
+        var loaded_profiles = try confloader.loadConfDir(Profile, allocator, profiles_path);
         defer loaded_profiles.deinit();
 
         try profiles.appendSlice(loaded_profiles.items);
@@ -27,11 +35,10 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profi
         for (profiles.items) |*profile| {
             if (std.mem.eql(u8, profile.name, "Proton")) {
                 proton_profile.* = profile;
-                std.log.info("Found Proton profile: {s}", .{profile.name});
                 break;
             }
         }
 
-        std.log.info("Loaded {d} profiles", .{profiles.items.len});
+        std.log.info("Loaded {d} profiles (mode: {s})", .{ profiles.items.len, @tagName(mode) });
     }
 }

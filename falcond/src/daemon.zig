@@ -11,6 +11,7 @@ const scx_scheds = @import("clients/scx_scheds.zig");
 pub const Daemon = struct {
     allocator: std.mem.Allocator,
     config_path: []const u8,
+    system_conf_path: []const u8,
     profile_manager: ProfileManager,
     oneshot: bool,
     known_pids: ?std.AutoHashMap(u32, *const Profile),
@@ -22,11 +23,14 @@ pub const Daemon = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool) !*Self {
+    pub fn init(allocator: std.mem.Allocator, config_path: []const u8, system_conf_path: []const u8, oneshot: bool) !*Self {
         const config_path_owned = try allocator.dupe(u8, config_path);
         errdefer allocator.free(config_path_owned);
 
-        const config = try Config.load(allocator, config_path);
+        const system_conf_path_owned = try allocator.dupe(u8, system_conf_path);
+        errdefer allocator.free(system_conf_path_owned);
+
+        const config = try Config.load(allocator, config_path, system_conf_path);
         const power_profiles = try PowerProfiles.init(allocator, config);
         errdefer power_profiles.deinit();
 
@@ -36,7 +40,7 @@ pub const Daemon = struct {
         }
 
         var profile_manager = ProfileManager.init(allocator, power_profiles, config);
-        try ProfileLoader.loadProfiles(allocator, &profile_manager.profiles, &profile_manager.proton_profile, oneshot);
+        try ProfileLoader.loadProfiles(allocator, &profile_manager.profiles, &profile_manager.proton_profile, oneshot, config.profile_mode);
 
         const current_time = std.time.nanoTimestamp();
         try scx_scheds.init(allocator);
@@ -44,15 +48,16 @@ pub const Daemon = struct {
         const self = try allocator.create(Self);
         self.* = .{
             .allocator = allocator,
+            .config_path = config_path_owned,
+            .system_conf_path = system_conf_path_owned,
             .profile_manager = profile_manager,
             .oneshot = oneshot,
             .known_pids = if (!oneshot) std.AutoHashMap(u32, *const Profile).init(allocator) else null,
             .power_profiles = power_profiles,
             .last_profiles_check = current_time,
             .last_config_check = current_time,
-            .config = config,
-            .config_path = config_path_owned,
             .performance_mode = performance_mode,
+            .config = config,
         };
 
         return self;
@@ -67,6 +72,7 @@ pub const Daemon = struct {
         }
         self.config.deinit();
         self.allocator.free(self.config_path);
+        self.allocator.free(self.system_conf_path);
         self.allocator.destroy(self);
     }
 
@@ -83,10 +89,11 @@ pub const Daemon = struct {
         self.power_profiles.deinit();
         self.config.deinit();
 
-        const config = try Config.load(self.allocator, self.config_path);
+        const config = try Config.load(self.allocator, self.config_path, self.system_conf_path);
         const power_profiles = try PowerProfiles.init(self.allocator, config);
         var profile_manager = ProfileManager.init(self.allocator, power_profiles, config);
-        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot);
+        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot, config.profile_mode);
+
         self.config = config;
         self.power_profiles = power_profiles;
         self.performance_mode = self.power_profiles.isPerformanceAvailable();

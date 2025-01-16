@@ -26,6 +26,9 @@ const AllocTracker = struct {
     }
 };
 
+const config_path: []const u8 = "/etc/falcond/config.conf";
+const system_conf_path: []const u8 = "/usr/share/falcond/system.conf";
+
 fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
     var t: *AllocTracker = @ptrCast(@alignCast(ctx));
     t.trackAlloc();
@@ -46,7 +49,6 @@ fn free(ctx: *anyopaque, buf: []u8, log2_buf_align: u8, ret_addr: usize) void {
 
 var gpa_vtable: *const std.mem.Allocator.VTable = undefined;
 var gpa_ptr: *anyopaque = undefined;
-
 pub fn main() !void {
     std.log.info("Starting falcond...", .{});
 
@@ -85,8 +87,27 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "--oneshot")) break true;
     } else false;
 
-    var daemon = try Daemon.init(allocator, "/etc/falcond/config.conf", oneshot);
+    try checkAndUpgradeConfig(allocator, config_path);
+
+    var daemon = try Daemon.init(allocator, config_path, system_conf_path, oneshot);
     defer daemon.deinit();
 
     try daemon.run();
+}
+
+fn checkAndUpgradeConfig(allocator: std.mem.Allocator, conf_path: []const u8) !void {
+    const file = std.fs.openFileAbsolute(conf_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    defer allocator.free(content);
+
+    if (std.mem.indexOf(u8, content, "system_processes = ")) |_| {
+        std.log.info("Upgrading config file to new format", .{});
+        file.close();
+        try std.fs.deleteFileAbsolute(config_path);
+    }
 }
