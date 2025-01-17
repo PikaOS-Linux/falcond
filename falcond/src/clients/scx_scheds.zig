@@ -75,7 +75,11 @@ pub fn init(alloc: std.mem.Allocator) !void {
     allocator = alloc;
     std.log.info("Initializing scheduler state", .{});
 
-    const sched_list = try getSupportedSchedulers(alloc);
+    const sched_list = getSupportedSchedulers(alloc) catch |err| {
+        std.log.warn("Failed to get supported schedulers: {}, scx_loader may not be available", .{err});
+        supported_schedulers = &[_]ScxScheduler{};
+        return;
+    };
     defer alloc.free(sched_list);
 
     std.log.info("Supported schedulers:", .{});
@@ -123,23 +127,38 @@ fn intToMode(value: u32) ScxError!ScxSchedModes {
 pub fn getCurrentScheduler(alloc: std.mem.Allocator) !?ScxScheduler {
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
 
-    const current = try dbus_conn.getProperty("CurrentScheduler");
+    const current = dbus_conn.getProperty("CurrentScheduler") catch |err| {
+        std.log.warn("Failed to get current scheduler: {}", .{err});
+        return .none;
+    };
     defer alloc.free(current);
 
-    if (current.len == 0) return null;
-    return try ScxScheduler.fromString(current);
+    if (current.len == 0) return .none;
+    return ScxScheduler.fromString(current) catch |err| {
+        std.log.warn("Invalid scheduler value: {}", .{err});
+        return .none;
+    };
 }
 
 pub fn getCurrentMode(alloc: std.mem.Allocator) !ScxSchedModes {
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
 
-    const mode_str = try dbus_conn.getProperty("SchedulerMode");
+    const mode_str = dbus_conn.getProperty("SchedulerMode") catch |err| {
+        std.log.warn("Failed to get scheduler mode: {}", .{err});
+        return .default;
+    };
     defer alloc.free(mode_str);
 
     if (mode_str.len == 0) return .default;
 
-    const mode = try std.fmt.parseInt(u32, mode_str, 10);
-    return intToMode(mode);
+    const mode = std.fmt.parseInt(u32, mode_str, 10) catch |err| {
+        std.log.warn("Invalid scheduler mode value: {}", .{err});
+        return .default;
+    };
+    return intToMode(mode) catch |err| {
+        std.log.warn("Invalid mode value: {}", .{err});
+        return .default;
+    };
 }
 
 pub fn getSupportedSchedulers(alloc: std.mem.Allocator) ![]ScxScheduler {
@@ -261,9 +280,9 @@ fn runSystemCtl(alloc: std.mem.Allocator, command: []const u8, service: []const 
 }
 
 pub fn deactivateScheduler(alloc: std.mem.Allocator) ScxError!void {
+    runSystemCtl(alloc, "start", "ananicy-cpp");
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
     try dbus_conn.callMethod("StopScheduler", &[_][]const u8{});
-    runSystemCtl(alloc, "start", "ananicy-cpp");
 }
 
 pub fn restorePreviousState(alloc: std.mem.Allocator) void {
