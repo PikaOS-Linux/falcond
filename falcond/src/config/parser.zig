@@ -288,7 +288,7 @@ pub fn Parser(comptime T: type) type {
                                 }
                             },
                             .pointer => |ptr_info| {
-                                if (ptr_info.size != .Slice) return error.InvalidSyntax;
+                                if (ptr_info.size != .many) return error.InvalidSyntax;
                                 switch (ptr_info.child) {
                                     u8 => {
                                         @field(result, field.name) = try self.parseString();

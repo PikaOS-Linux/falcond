@@ -266,15 +266,13 @@ fn runSystemCtl(alloc: std.mem.Allocator, command: []const u8, service: []const 
         .allocator = alloc,
         .argv = &argv,
         .max_output_bytes = max_output_size,
-    }) catch |err| {
-        std.log.warn("Failed to run systemctl {s} {s}: {}", .{ command, service, err });
+    }) catch {
         return;
     };
     defer alloc.free(result.stderr);
     defer alloc.free(result.stdout);
 
     if (result.term.Exited != 0) {
-        std.log.warn("systemctl failed: {s}", .{result.stderr});
         return;
     }
 }
