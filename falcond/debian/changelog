@@ -1,3 +1,9 @@
+falcond (1.0.8-101pika3) pika; urgency=low
+
+  * Update profiles
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 12 Jan 2025 13:48:00 +0300
+
 falcond (1.0.8-101pika2) pika; urgency=low
 
   * Fix scx scheduler mode selection order
