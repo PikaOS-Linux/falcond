@@ -20,7 +20,10 @@ pub fn loadConf(comptime T: type, allocator: std.mem.Allocator, path: []const u8
     if (bytes_read != size) return error.UnexpectedEOF;
 
     var parser = Parser(T).init(allocator, buffer);
-    return try parser.parse();
+    return parser.parse() catch |err| {
+        std.log.err("Failed to parse config file '{s}': {s}", .{ path, @errorName(err) });
+        return err;
+    };
 }
 
 pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayList(T) {
@@ -43,7 +46,10 @@ pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []c
             defer allocator.free(content);
 
             var parser = Parser(T).init(allocator, content);
-            const parsed = try parser.parse();
+            const parsed = parser.parse() catch |err| {
+                std.log.err("Failed to parse config file '{s}': {s}", .{ path, @errorName(err) });
+                return err;
+            };
             try result.append(parsed);
         }
     }

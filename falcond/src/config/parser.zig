@@ -81,17 +81,33 @@ pub fn Parser(comptime T: type) type {
                 return error.InvalidSyntax;
 
             self.pos += 1;
-            const start = self.pos;
+            var escaped = false;
+            var result = std.ArrayList(u8).init(self.allocator);
+            errdefer result.deinit();
 
             while (self.pos < self.content.len) : (self.pos += 1) {
-                switch (self.content[self.pos]) {
+                const c = self.content[self.pos];
+                if (escaped) {
+                    switch (c) {
+                        '"' => try result.append('"'),
+                        '\\' => try result.append('\\'),
+                        'n' => try result.append('\n'),
+                        'r' => try result.append('\r'),
+                        't' => try result.append('\t'),
+                        else => return error.InvalidSyntax,
+                    }
+                    escaped = false;
+                    continue;
+                }
+                switch (c) {
                     '"' => {
-                        const str = try self.allocator.dupe(u8, self.content[start..self.pos]);
                         self.pos += 1;
-                        return str;
+                        return result.toOwnedSlice();
                     },
-                    '\\' => return error.InvalidSyntax,
-                    else => {},
+                    '\\' => {
+                        escaped = true;
+                    },
+                    else => try result.append(c),
                 }
             }
             return error.UnterminatedString;
@@ -162,7 +178,10 @@ pub fn Parser(comptime T: type) type {
                     return values.toOwnedSlice();
                 }
 
-                const str = try self.parseString();
+                const str = self.parseString() catch |err| {
+                    std.log.err("Failed to parse string at position {}: {s}", .{ self.pos, @errorName(err) });
+                    return err;
+                };
                 try values.append(str);
 
                 self.skipWhitespace();
@@ -174,8 +193,10 @@ pub fn Parser(comptime T: type) type {
                     self.pos += 1;
                     return values.toOwnedSlice();
                 }
+                std.log.err("Expected ',' or ']' but found '{c}' at position {}", .{ self.content[self.pos], self.pos });
                 return error.InvalidSyntax;
             }
+            std.log.err("Unterminated array at position {}", .{self.pos});
             return error.InvalidSyntax;
         }
 
@@ -258,11 +279,16 @@ pub fn Parser(comptime T: type) type {
                                 @field(result, field.name) = @intCast(try self.parseNumber());
                             },
                             .array => |array_info| {
-                                const array = try self.parseArray();
-                                if (array.len > array_info.len) return error.InvalidSyntax;
-                                @field(result, field.name) = undefined;
-                                var dest = &@field(result, field.name);
-                                @memcpy(dest[0..array.len], array);
+                                switch (@typeInfo(array_info.child)) {
+                                    i64 => {
+                                        const array = try self.parseArray();
+                                        if (array.len > array_info.len) return error.InvalidSyntax;
+                                        @field(result, field.name) = undefined;
+                                        var dest = &@field(result, field.name);
+                                        @memcpy(dest[0..array.len], array);
+                                    },
+                                    else => return error.InvalidSyntax,
+                                }
                             },
                             .@"enum" => {
                                 const ident = try self.parseIdentifier();
@@ -288,18 +314,22 @@ pub fn Parser(comptime T: type) type {
                                 }
                             },
                             .pointer => |ptr_info| {
-                                if (ptr_info.size != .many) return error.InvalidSyntax;
-                                switch (ptr_info.child) {
+                                if (ptr_info.size != .slice) {
+                                    return error.InvalidSyntax;
+                                }
+
+                                if (ptr_info.child == []const u8) {
+                                    @field(result, field.name) = try self.parseStringArray();
+                                } else switch (ptr_info.child) {
                                     u8 => {
                                         @field(result, field.name) = try self.parseString();
                                     },
                                     i64 => {
                                         @field(result, field.name) = try self.parseArray();
                                     },
-                                    []const u8 => {
-                                        @field(result, field.name) = try self.parseStringArray();
+                                    else => {
+                                        return error.InvalidSyntax;
                                     },
-                                    else => return error.InvalidSyntax,
                                 }
                             },
                             else => return error.InvalidSyntax,
