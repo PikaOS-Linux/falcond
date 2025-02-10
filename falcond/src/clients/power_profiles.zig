@@ -13,7 +13,7 @@ pub const PowerProfiles = struct {
     original_profile: ?[]const u8,
     has_performance: bool,
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) !*PowerProfiles {
+    pub fn init(allocator: std.mem.Allocator, config: Config) !?*PowerProfiles {
         var self = try allocator.create(PowerProfiles);
         errdefer allocator.destroy(self);
 
@@ -37,7 +37,11 @@ pub const PowerProfiles = struct {
             .has_performance = false,
         };
 
-        const profiles = try self.getAvailableProfiles(allocator);
+        const profiles = self.getAvailableProfiles(allocator) catch |err| {
+            std.log.err("Failed to get power profiles: {}, power profiles will be disabled", .{err});
+            allocator.destroy(self);
+            return null;
+        };
         defer {
             for (profiles) |profile| {
                 allocator.free(profile);

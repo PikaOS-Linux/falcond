@@ -14,10 +14,10 @@ pub const ProfileManager = struct {
     proton_profile: ?*const Profile,
     active_profile: ?*const Profile = null,
     queued_profiles: std.ArrayList(*const Profile),
-    power_profiles: *PowerProfiles,
+    power_profiles: ?*PowerProfiles,
     config: Config,
 
-    pub fn init(allocator: std.mem.Allocator, power_profiles: *PowerProfiles, config: Config) ProfileManager {
+    pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
         return .{
             .allocator = allocator,
             .profiles = std.ArrayList(Profile).init(allocator),
@@ -47,9 +47,9 @@ pub const ProfileManager = struct {
             std.log.info("Activating profile: {s}", .{profile.name});
             self.active_profile = profile;
 
-            if (profile.performance_mode and self.power_profiles.isPerformanceAvailable()) {
+            if (profile.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
                 std.log.info("Enabling performance mode for profile: {s}", .{profile.name});
-                self.power_profiles.enablePerformanceMode();
+                self.power_profiles.?.enablePerformanceMode();
             }
 
             const effective_mode = if (self.config.vcache_mode != .none)
@@ -80,9 +80,9 @@ pub const ProfileManager = struct {
             if (active == profile) {
                 std.log.info("Deactivating profile: {s}", .{profile.name});
 
-                if (profile.performance_mode and self.power_profiles.isPerformanceAvailable()) {
+                if (profile.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
                     std.log.info("Disabling performance mode for profile: {s}", .{profile.name});
-                    self.power_profiles.disablePerformanceMode();
+                    self.power_profiles.?.disablePerformanceMode();
                 }
 
                 vcache_setting.applyVCacheMode(.none);
@@ -102,9 +102,9 @@ pub const ProfileManager = struct {
             if (active == profile) {
                 std.log.info("Unloading profile: {s}", .{profile.name});
 
-                if (profile.performance_mode and self.power_profiles.isPerformanceAvailable()) {
+                if (profile.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
                     std.log.info("Disabling performance mode for profile: {s}", .{profile.name});
-                    self.power_profiles.disablePerformanceMode();
+                    self.power_profiles.?.disablePerformanceMode();
                 }
 
                 vcache_setting.applyVCacheMode(.none);

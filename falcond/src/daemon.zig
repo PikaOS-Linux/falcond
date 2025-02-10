@@ -15,7 +15,7 @@ pub const Daemon = struct {
     profile_manager: ProfileManager,
     oneshot: bool,
     known_pids: ?std.AutoHashMap(u32, *const Profile),
-    power_profiles: *PowerProfiles,
+    power_profiles: ?*PowerProfiles,
     performance_mode: bool,
     last_profiles_check: i128,
     last_config_check: i128,
@@ -30,13 +30,17 @@ pub const Daemon = struct {
         const system_conf_path_owned = try allocator.dupe(u8, system_conf_path);
         errdefer allocator.free(system_conf_path_owned);
 
-        const config = try Config.load(allocator, config_path, system_conf_path);
-        const power_profiles = try PowerProfiles.init(allocator, config);
-        errdefer power_profiles.deinit();
+        var config = try Config.load(allocator, config_path, system_conf_path);
+        errdefer config.deinit();
 
-        const performance_mode = power_profiles.isPerformanceAvailable();
-        if (performance_mode) {
-            std.log.info("Performance profile available - power profile management enabled", .{});
+        const power_profiles = try PowerProfiles.init(allocator, config);
+        var performance_mode = false;
+
+        if (power_profiles) |pp| {
+            performance_mode = pp.isPerformanceAvailable();
+            if (performance_mode) {
+                std.log.info("Performance profile available - power profile management enabled", .{});
+            }
         }
 
         var profile_manager = ProfileManager.init(allocator, power_profiles, config);
@@ -66,7 +70,9 @@ pub const Daemon = struct {
     pub fn deinit(self: *Self) void {
         scx_scheds.deinit();
         self.profile_manager.deinit();
-        self.power_profiles.deinit();
+        if (self.power_profiles) |pp| {
+            pp.*.deinit();
+        }
         if (self.known_pids) |*map| {
             map.deinit();
         }
@@ -86,7 +92,9 @@ pub const Daemon = struct {
         }
 
         self.profile_manager.deinit();
-        self.power_profiles.deinit();
+        if (self.power_profiles) |pp| {
+            pp.*.deinit();
+        }
         self.config.deinit();
 
         const config = try Config.load(self.allocator, self.config_path, self.system_conf_path);
@@ -96,7 +104,7 @@ pub const Daemon = struct {
 
         self.config = config;
         self.power_profiles = power_profiles;
-        self.performance_mode = self.power_profiles.isPerformanceAvailable();
+        self.performance_mode = if (power_profiles) |pp| pp.isPerformanceAvailable() else false;
         self.profile_manager = profile_manager;
     }
 
