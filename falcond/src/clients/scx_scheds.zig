@@ -20,6 +20,8 @@ pub const ScxScheduler = enum {
     simple,
     userland,
     vder,
+    p2dq,
+    tickless,
     none,
 
     pub fn toScxName(self: ScxScheduler) []const u8 {
