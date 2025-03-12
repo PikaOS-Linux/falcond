@@ -49,6 +49,8 @@ pub const ScxScheduler = enum {
         if (std.mem.eql(u8, str, "scx_simple")) return .simple;
         if (std.mem.eql(u8, str, "scx_userland")) return .userland;
         if (std.mem.eql(u8, str, "scx_vder")) return .vder;
+        if (std.mem.eql(u8, str, "scx_p2dq")) return .p2dq;
+        if (std.mem.eql(u8, str, "scx_tickless")) return .tickless;
 
         return error.InvalidValue;
     }
