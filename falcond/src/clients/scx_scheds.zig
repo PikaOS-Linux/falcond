@@ -180,7 +180,10 @@ pub fn getSupportedSchedulers(alloc: std.mem.Allocator) ![]ScxScheduler {
     errdefer result.deinit();
 
     for (schedulers) |s| {
-        const scheduler = try ScxScheduler.fromString(s);
+        const scheduler = ScxScheduler.fromString(s) catch |err| {
+            std.log.warn("Skipping unknown scheduler: {s}, error: {}", .{ s, err });
+            continue;
+        };
         try result.append(scheduler);
     }
 
