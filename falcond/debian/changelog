@@ -1,3 +1,9 @@
+falcond (1.1.3-101pika2) pika; urgency=low
+
+  * Add profile for oblivion remaster
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 12 Jan 2025 13:48:00 +0300
+
 falcond (1.1.3-101pika1) pika; urgency=low
 
   * ABetter handling of unknown schedulers
