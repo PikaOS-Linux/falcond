@@ -8,6 +8,8 @@ pub const Profile = struct {
     scx_sched: scx_scheds.ScxScheduler = .none,
     scx_sched_props: ?scx_scheds.ScxSchedModes = null,
     vcache_mode: vcache_setting.VCacheMode = .cache,
+    start_script: ?[]const u8 = null,
+    stop_script: ?[]const u8 = null,
 
     pub fn matches(self: *const Profile, process_name: []const u8) bool {
         const is_match = std.ascii.eqlIgnoreCase(self.name, process_name);

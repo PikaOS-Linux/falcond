@@ -77,14 +77,17 @@ pub fn Parser(comptime T: type) type {
         }
 
         fn parseString(self: *Self) ![]const u8 {
-            if (self.pos >= self.content.len or self.content[self.pos] != '"')
+            if (self.pos >= self.content.len or self.content[self.pos] != '"') {
+                std.log.err("Expected opening quote for string at position {}", .{self.pos});
                 return error.InvalidSyntax;
+            }
 
             self.pos += 1;
             var escaped = false;
             var result = std.ArrayList(u8).init(self.allocator);
             errdefer result.deinit();
 
+            const start_pos = self.pos;
             while (self.pos < self.content.len) : (self.pos += 1) {
                 const c = self.content[self.pos];
                 if (escaped) {
@@ -94,7 +97,10 @@ pub fn Parser(comptime T: type) type {
                         'n' => try result.append('\n'),
                         'r' => try result.append('\r'),
                         't' => try result.append('\t'),
-                        else => return error.InvalidSyntax,
+                        else => {
+                            std.log.err("Invalid escape sequence '\\{c}' at position {}", .{ c, self.pos });
+                            return error.InvalidSyntax;
+                        },
                     }
                     escaped = false;
                     continue;
@@ -110,6 +116,8 @@ pub fn Parser(comptime T: type) type {
                     else => try result.append(c),
                 }
             }
+
+            std.log.err("Unterminated string starting at position {}, content: {s}", .{ start_pos, self.content[start_pos..@min(start_pos + 20, self.content.len)] });
             return error.UnterminatedString;
         }
 
@@ -308,6 +316,18 @@ pub fn Parser(comptime T: type) type {
                                                 @field(result, field.name) = @field(opt_info.child, enum_field.name);
                                                 break;
                                             }
+                                        }
+                                    },
+                                    .pointer => |ptr_info| {
+                                        if (ptr_info.size != .slice) {
+                                            return error.InvalidSyntax;
+                                        }
+
+                                        if (ptr_info.child == u8) {
+                                            const str = try self.parseString();
+                                            @field(result, field.name) = str;
+                                        } else {
+                                            return error.InvalidSyntax;
                                         }
                                     },
                                     else => return error.InvalidSyntax,

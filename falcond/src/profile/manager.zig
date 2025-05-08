@@ -1,4 +1,5 @@
 const std = @import("std");
+const os = std.os;
 const types = @import("types.zig");
 const matcher = @import("matcher.zig");
 const Profile = types.Profile;
@@ -6,6 +7,12 @@ const PowerProfiles = @import("../clients/power_profiles.zig").PowerProfiles;
 const Config = @import("../config/config.zig").Config;
 const vcache_setting = @import("../clients/vcache_setting.zig");
 const scx_scheds = @import("../clients/scx_scheds.zig");
+const scriptrunner = @import("../clients/scriptrunner.zig");
+
+pub const ProfileProcessInfo = struct {
+    pid: []const u8,
+    uid: ?os.linux.uid_t,
+};
 
 pub const ProfileManager = struct {
     comptime profiles_dir: []const u8 = "/usr/share/falcond/profiles",
@@ -16,6 +23,9 @@ pub const ProfileManager = struct {
     queued_profiles: std.ArrayList(*const Profile),
     power_profiles: ?*PowerProfiles,
     config: Config,
+    last_deactivated_profile: ?*const Profile = null,
+    // Map to store process info for each profile
+    profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
 
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
         return .{
@@ -25,6 +35,7 @@ pub const ProfileManager = struct {
             .queued_profiles = std.ArrayList(*const Profile).init(allocator),
             .power_profiles = power_profiles,
             .config = config,
+            .profile_process_info = std.AutoHashMap(*const Profile, ProfileProcessInfo).init(allocator),
         };
     }
 
@@ -34,6 +45,13 @@ pub const ProfileManager = struct {
                 std.log.err("Failed to deactivate profile: {}", .{err});
             };
         }
+
+        // Free all process IDs stored in the map
+        var it = self.profile_process_info.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.value_ptr.pid);
+        }
+        self.profile_process_info.deinit();
 
         for (self.profiles.items) |profile| {
             self.allocator.free(profile.name);
@@ -68,8 +86,22 @@ pub const ProfileManager = struct {
             else
                 self.config.scx_sched_props;
 
+            if (profile.start_script != null) {
+                // Get the process info for this profile from the map
+                if (self.profile_process_info.get(profile)) |process_info| {
+                    scriptrunner.runScript(self.allocator, profile.start_script.?, process_info.pid, process_info.uid);
+                } else {
+                    std.log.warn("Cannot run start script for profile {s}: no process info available", .{profile.name});
+                }
+            }
+
             scx_scheds.applyScheduler(self.allocator, effective_sched, effective_scx_mode);
         } else {
+            // Don't queue the profile if it's already active
+            if (self.active_profile.? == profile) {
+                std.log.debug("Profile {s} is already active, not queueing", .{profile.name});
+                return;
+            }
             std.log.info("Queueing profile: {s} (active: {s})", .{ profile.name, self.active_profile.?.name });
             try self.queued_profiles.append(profile);
         }
@@ -89,9 +121,38 @@ pub const ProfileManager = struct {
                 scx_scheds.restorePreviousState(self.allocator);
                 self.active_profile = null;
 
+                self.last_deactivated_profile = profile;
+
+                if (profile.stop_script != null) {
+                    // Get the process info for this profile from the map
+                    if (self.profile_process_info.get(profile)) |process_info| {
+                        scriptrunner.runScript(self.allocator, profile.stop_script.?, process_info.pid, process_info.uid);
+                    } else {
+                        std.log.warn("Cannot run stop script for profile {s}: no process info available", .{profile.name});
+                    }
+                }
+
+                // Remove the process info from the map
+                if (self.profile_process_info.fetchRemove(profile)) |kv| {
+                    // Free the process ID
+                    self.allocator.free(kv.value.pid);
+                    std.log.debug("Removed process info for profile {s}", .{profile.name});
+                }
+
                 if (self.queued_profiles.items.len > 0) {
-                    const next_profile = self.queued_profiles.orderedRemove(0);
-                    try self.activateProfile(next_profile);
+                    const next_profile = self.queued_profiles.items[0];
+
+                    // If the next profile is the same as the one we just deactivated, remove it from the queue
+                    if (next_profile == profile) {
+                        _ = self.queued_profiles.orderedRemove(0);
+                        std.log.info("Removed duplicate profile from queue: {s}", .{profile.name});
+                    }
+
+                    // Only activate the next profile if there's still something in the queue
+                    if (self.queued_profiles.items.len > 0) {
+                        const profile_to_activate = self.queued_profiles.orderedRemove(0);
+                        try self.activateProfile(profile_to_activate);
+                    }
                 }
             }
         }
@@ -115,6 +176,78 @@ pub const ProfileManager = struct {
     }
 
     pub fn matchProcess(self: *ProfileManager, arena: std.mem.Allocator, pid: []const u8, process_name: []const u8) !?*const Profile {
-        return matcher.matchProcess(self.profiles.items, self.proton_profile, arena, pid, process_name, self.config);
+        const match = try matcher.matchProcess(self.profiles.items, self.proton_profile, arena, pid, process_name, self.config);
+
+        // Store the process ID and user ID if we have a match
+        if (match != null) {
+            // Make a copy of the pid since it might be from a temporary arena
+            const pid_copy = try self.allocator.dupe(u8, pid);
+
+            // Try to find the user ID for this process
+            const uid = scriptrunner.findUserForProcess(pid) catch null;
+
+            // Check if we already have an entry for this profile
+            if (self.profile_process_info.get(match.?)) |old_info| {
+                // Free the old process ID
+                self.allocator.free(old_info.pid);
+            }
+
+            // Store the process info in the map
+            const process_info = ProfileProcessInfo{
+                .pid = pid_copy,
+                .uid = uid,
+            };
+            self.profile_process_info.put(match.?, process_info) catch |err| {
+                std.log.err("Failed to store process info for profile {s}: {}", .{ match.?.name, err });
+                // Free the pid_copy if we couldn't store it
+                self.allocator.free(pid_copy);
+            };
+        }
+
+        // Skip if this is the profile we just deactivated to prevent immediate requeuing
+        if (match != null and self.last_deactivated_profile != null) {
+            // Check if this is the same profile we just deactivated
+            if (match == self.last_deactivated_profile) {
+                std.log.info("Ignoring recently deactivated profile: {s}", .{match.?.name});
+                return null; // Return null instead of the match to prevent any activation
+            }
+
+            // Clear the last deactivated profile when we see a different profile
+            self.last_deactivated_profile = null;
+        }
+
+        // Check if we have a match for an .exe file (not Proton) and Proton is currently active
+        if (match != null and
+            std.mem.endsWith(u8, process_name, ".exe") and
+            match != self.proton_profile and
+            self.active_profile == self.proton_profile)
+        {
+            std.log.info("Overriding Proton profile with .exe profile: {s}", .{match.?.name});
+
+            // Deactivate the Proton profile but don't run its stop script yet
+            if (self.active_profile) |active| {
+                // Save the current Proton profile to add to queue later
+                const proton = active;
+
+                // Deactivate without running stop script
+                if (proton.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
+                    std.log.info("Disabling performance mode for Proton profile", .{});
+                    self.power_profiles.?.disablePerformanceMode();
+                }
+
+                vcache_setting.applyVCacheMode(.none);
+                scx_scheds.restorePreviousState(self.allocator);
+                self.active_profile = null;
+
+                // Add Proton to the front of the queue
+                try self.queued_profiles.insert(0, proton);
+                std.log.info("Added Proton profile to front of queue", .{});
+            }
+
+            // Activate the .exe profile
+            try self.activateProfile(match.?);
+        }
+
+        return match;
     }
 };

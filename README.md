@@ -64,6 +64,8 @@ performance_mode = true
 scx_sched = bpfland
 scx_sched_props = gaming
 vcache_mode = cache
+start_script = "/home/ferreo/start.sh"
+stop_script = "notify-send 'game stopped'"
 ```
 
 ### Available Options
@@ -73,6 +75,8 @@ vcache_mode = cache
 - `scx_sched`: SCX scheduler (options: none, bpfland, lavd, rusty, flash)
 - `scx_sched_props`: SCX scheduler mode (options: none, gaming, power, latency, server)
 - `vcache_mode`: VCache management mode (options: none, cache, freq)
+- `start_script`: Script to run when the game starts
+- `stop_script`: Script to run when the game stops
 
 ## Service Management
 
