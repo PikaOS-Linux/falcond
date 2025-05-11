@@ -23,7 +23,6 @@ pub const ProfileManager = struct {
     queued_profiles: std.ArrayList(*const Profile),
     power_profiles: ?*PowerProfiles,
     config: Config,
-    last_deactivated_profile: ?*const Profile = null,
     // Map to store process info for each profile
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
 
@@ -121,8 +120,6 @@ pub const ProfileManager = struct {
                 scx_scheds.restorePreviousState(self.allocator);
                 self.active_profile = null;
 
-                self.last_deactivated_profile = profile;
-
                 if (profile.stop_script != null) {
                     // Get the process info for this profile from the map
                     if (self.profile_process_info.get(profile)) |process_info| {
@@ -202,18 +199,6 @@ pub const ProfileManager = struct {
                 // Free the pid_copy if we couldn't store it
                 self.allocator.free(pid_copy);
             };
-        }
-
-        // Skip if this is the profile we just deactivated to prevent immediate requeuing
-        if (match != null and self.last_deactivated_profile != null) {
-            // Check if this is the same profile we just deactivated
-            if (match == self.last_deactivated_profile) {
-                std.log.info("Ignoring recently deactivated profile: {s}", .{match.?.name});
-                return null; // Return null instead of the match to prevent any activation
-            }
-
-            // Clear the last deactivated profile when we see a different profile
-            self.last_deactivated_profile = null;
         }
 
         // Check if we have a match for an .exe file (not Proton) and Proton is currently active
