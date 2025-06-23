@@ -21,6 +21,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profi
         proton_profile.* = &profiles.items[1];
     } else {
         const base_path = "/usr/share/falcond/profiles";
+        const user_profiles_path = "/usr/share/falcond/profiles/user";
         const profiles_path = if (mode != .none)
             try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_path, @tagName(mode) })
         else
@@ -32,6 +33,38 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profi
 
         try profiles.appendSlice(loaded_profiles.items);
 
+        const has_user_profiles = blk: {
+            _ = std.fs.accessAbsolute(user_profiles_path, .{}) catch |err| {
+                if (err == error.FileNotFound) {
+                    std.log.debug("User profiles directory not found: {s}", .{user_profiles_path});
+                } else {
+                    std.log.err("Failed to access user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
+                }
+                break :blk false;
+            };
+            break :blk true;
+        };
+
+        var user_count: usize = 0;
+        if (has_user_profiles) {
+            var user_loaded_profiles = try confloader.loadConfDir(Profile, allocator, user_profiles_path);
+            defer user_loaded_profiles.deinit();
+            user_count = user_loaded_profiles.items.len;
+            for (user_loaded_profiles.items) |user_profile| {
+                var found = false;
+                for (profiles.items) |*profile| {
+                    if (std.mem.eql(u8, profile.name, user_profile.name)) {
+                        profile.* = user_profile;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    try profiles.append(user_profile);
+                }
+            }
+        }
+
         for (profiles.items) |*profile| {
             if (std.mem.eql(u8, profile.name, "Proton")) {
                 proton_profile.* = profile;
@@ -39,6 +72,6 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profi
             }
         }
 
-        std.log.info("Loaded {d} profiles (mode: {s})", .{ profiles.items.len, @tagName(mode) });
+        std.log.info("Loaded {d} profiles ({d} user profiles) (mode: {s})", .{ profiles.items.len, user_count, @tagName(mode) });
     }
 }

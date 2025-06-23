@@ -57,6 +57,17 @@ profile_mode = "handheld" # or "htpc" or "none"
 Game profiles are stored in `/usr/share/falcond/profiles/` and define specific optimizations for individual games. You can contribute new profiles via PR at:
 [Falcond Profiles Repository](https://github.com/PikaOS-Linux/falcond-profiles)
 
+### User Profiles
+
+falcond supports user-specific profiles that override system profiles. User profiles are stored in `/usr/share/falcond/profiles/user/` and take precedence over system profiles with the same name. This allows you to customize game settings without modifying system files.
+
+To create a user profile:
+1. Create the directory if it doesn't exist: `sudo mkdir -p /usr/share/falcond/profiles/user/`
+2. Create a profile file with the game's name: `sudo nano /usr/share/falcond/profiles/user/game.conf`
+3. Add your custom settings
+
+User profiles follow the same format as system profiles but will override any system profile with the same name. If a user profile doesn't exist for a game, the system profile will be used.
+
 Example profile:
 ```
 name = "game.exe"

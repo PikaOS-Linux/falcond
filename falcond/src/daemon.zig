@@ -64,6 +64,8 @@ pub const Daemon = struct {
             .config = config,
         };
 
+        try self.profile_manager.updateFileCount(null);
+
         return self;
     }
 
@@ -106,6 +108,8 @@ pub const Daemon = struct {
         self.power_profiles = power_profiles;
         self.performance_mode = if (power_profiles) |pp| pp.isPerformanceAvailable() else false;
         self.profile_manager = profile_manager;
+
+        try self.profile_manager.updateFileCount(null);
     }
 
     fn checkConfigChanges(self: *Self) !bool {
@@ -120,15 +124,18 @@ pub const Daemon = struct {
     }
 
     fn checkProfilesChanges(self: *Self) !bool {
+        const user_profiles_path = "/usr/share/falcond/profiles/user";
         var dir = try std.fs.cwd().openDir(self.profile_manager.profiles_dir, .{ .iterate = true });
         defer dir.close();
 
         var latest_mtime: i128 = self.last_profiles_check;
-        var file_count: usize = 0;
+        var current_file_count: usize = 0;
+
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
-            if (entry.kind == .file) {
-                file_count += 1;
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
+                current_file_count += 1;
+
                 const stat = try dir.statFile(entry.name);
                 const mtime = @as(i128, @intCast(stat.mtime));
                 if (mtime > latest_mtime) {
@@ -137,9 +144,39 @@ pub const Daemon = struct {
             }
         }
 
-        if (latest_mtime > self.last_profiles_check or file_count != self.profile_manager.profiles.items.len) {
+        var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
+            if (err != error.FileNotFound) {
+                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
+            } else {
+                std.log.debug("User profiles directory not found: {s}", .{user_profiles_path});
+            }
+
+            if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
+                std.log.info("Profile changes detected in system profiles, reloading profiles", .{});
+                self.last_profiles_check = std.time.nanoTimestamp();
+                try self.profile_manager.updateFileCount(current_file_count);
+                return true;
+            }
+            return false;
+        };
+        defer user_dir.close();
+
+        var user_iter = user_dir.iterate();
+        while (try user_iter.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
+                current_file_count += 1;
+                const stat = try user_dir.statFile(entry.name);
+                const mtime = @as(i128, @intCast(stat.mtime));
+                if (mtime > latest_mtime) {
+                    latest_mtime = mtime;
+                }
+            }
+        }
+
+        if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
             std.log.info("Profile changes detected, reloading profiles", .{});
             self.last_profiles_check = std.time.nanoTimestamp();
+            try self.profile_manager.updateFileCount(current_file_count);
             return true;
         }
 

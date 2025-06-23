@@ -23,8 +23,8 @@ pub const ProfileManager = struct {
     queued_profiles: std.ArrayList(*const Profile),
     power_profiles: ?*PowerProfiles,
     config: Config,
-    // Map to store process info for each profile
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
+    file_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
         return .{
@@ -36,6 +36,45 @@ pub const ProfileManager = struct {
             .config = config,
             .profile_process_info = std.AutoHashMap(*const Profile, ProfileProcessInfo).init(allocator),
         };
+    }
+
+    pub fn updateFileCount(self: *ProfileManager, maybe_count: ?usize) !void {
+        if (maybe_count) |count| {
+            self.file_count = count;
+            return;
+        }
+
+        const user_profiles_path = "/usr/share/falcond/profiles/user";
+        var count: usize = 0;
+        var dir = try std.fs.cwd().openDir(self.profiles_dir, .{ .iterate = true });
+        defer dir.close();
+
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
+                count += 1;
+            }
+        }
+
+        var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
+            if (err != error.FileNotFound) {
+                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
+            } else {
+                std.log.debug("User profiles directory not found: {s}", .{user_profiles_path});
+            }
+            self.file_count = count;
+            return;
+        };
+        defer user_dir.close();
+
+        var user_iter = user_dir.iterate();
+        while (try user_iter.next()) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
+                count += 1;
+            }
+        }
+
+        self.file_count = count;
     }
 
     pub fn deinit(self: *ProfileManager) void {
