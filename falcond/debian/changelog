@@ -1,3 +1,9 @@
+falcond (1.1.7-101pika1) pika; urgency=low
+
+  * Fix profile activation/deactivation when multiple instances of the same profile are running
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 08 Jul 2025 22:21:39 +0300
+
 falcond (1.1.6-101pika1) pika; urgency=low
 
   * feat: add support for user-specific game profiles that override system profiles

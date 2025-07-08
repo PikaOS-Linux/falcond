@@ -10,8 +10,32 @@ const scx_scheds = @import("../clients/scx_scheds.zig");
 const scriptrunner = @import("../clients/scriptrunner.zig");
 
 pub const ProfileProcessInfo = struct {
-    pid: []const u8,
+    pids: std.ArrayList([]const u8),
     uid: ?os.linux.uid_t,
+
+    pub fn init(allocator: std.mem.Allocator) ProfileProcessInfo {
+        return .{
+            .pids = std.ArrayList([]const u8).init(allocator),
+            .uid = null,
+        };
+    }
+
+    pub fn deinit(self: *ProfileProcessInfo) void {
+        for (self.pids.items) |pid| {
+            self.pids.allocator.free(pid);
+        }
+        self.pids.deinit();
+    }
+
+    pub fn removePid(self: *ProfileProcessInfo, allocator: std.mem.Allocator, pid_to_remove: []const u8) bool {
+        for (self.pids.items, 0..) |pid, i| {
+            if (std.mem.eql(u8, pid, pid_to_remove)) {
+                allocator.free(self.pids.orderedRemove(i));
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 pub const ProfileManager = struct {
@@ -79,7 +103,7 @@ pub const ProfileManager = struct {
 
     pub fn deinit(self: *ProfileManager) void {
         if (self.active_profile) |profile| {
-            self.deactivateProfile(profile) catch |err| {
+            self.deactivateProfile(profile, null) catch |err| {
                 std.log.err("Failed to deactivate profile: {}", .{err});
             };
         }
@@ -87,7 +111,7 @@ pub const ProfileManager = struct {
         // Free all process IDs stored in the map
         var it = self.profile_process_info.iterator();
         while (it.next()) |entry| {
-            self.allocator.free(entry.value_ptr.pid);
+            entry.value_ptr.deinit();
         }
         self.profile_process_info.deinit();
 
@@ -127,7 +151,12 @@ pub const ProfileManager = struct {
             if (profile.start_script != null) {
                 // Get the process info for this profile from the map
                 if (self.profile_process_info.get(profile)) |process_info| {
-                    scriptrunner.runScript(self.allocator, profile.start_script.?, process_info.pid, process_info.uid);
+                    if (process_info.pids.items.len > 0) {
+                        // Use the first PID for the script
+                        scriptrunner.runScript(self.allocator, profile.start_script.?, process_info.pids.items[0], process_info.uid);
+                    } else {
+                        std.log.warn("Cannot run start script for profile {s}: no PIDs available", .{profile.name});
+                    }
                 } else {
                     std.log.warn("Cannot run start script for profile {s}: no process info available", .{profile.name});
                 }
@@ -145,9 +174,28 @@ pub const ProfileManager = struct {
         }
     }
 
-    pub fn deactivateProfile(self: *ProfileManager, profile: *const Profile) !void {
+    pub fn deactivateProfile(self: *ProfileManager, profile: *const Profile, pid: ?[]const u8) !void {
         if (self.active_profile) |active| {
             if (active == profile) {
+                // Check if there are multiple instances of this profile
+                if (self.profile_process_info.getPtr(profile)) |process_info| {
+                    if (pid != null) {
+                        // Remove the specific PID
+                        const removed = process_info.removePid(self.allocator, pid.?);
+                        if (removed) {
+                            std.log.debug("Removed PID {s} from profile {s}, {d} instances remaining", .{ pid.?, profile.name, process_info.pids.items.len });
+                            if (process_info.pids.items.len > 0) {
+                                return;
+                            }
+                        } else {
+                            std.log.warn("Failed to find PID {s} in profile {s}", .{ pid.?, profile.name });
+                            if (process_info.pids.items.len > 0) {
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 std.log.info("Deactivating profile: {s}", .{profile.name});
 
                 if (profile.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
@@ -162,17 +210,27 @@ pub const ProfileManager = struct {
                 if (profile.stop_script != null) {
                     // Get the process info for this profile from the map
                     if (self.profile_process_info.get(profile)) |process_info| {
-                        scriptrunner.runScript(self.allocator, profile.stop_script.?, process_info.pid, process_info.uid);
+                        // Determine which PID to use for the script
+                        if (pid != null) {
+                            // Use the specific PID that's being deactivated
+                            scriptrunner.runScript(self.allocator, profile.stop_script.?, pid.?, process_info.uid);
+                        } else if (process_info.pids.items.len > 0) {
+                            // Use the first PID in the list
+                            scriptrunner.runScript(self.allocator, profile.stop_script.?, process_info.pids.items[0], process_info.uid);
+                        } else {
+                            std.log.warn("Cannot run stop script for profile {s}: no PIDs available", .{profile.name});
+                        }
                     } else {
                         std.log.warn("Cannot run stop script for profile {s}: no process info available", .{profile.name});
                     }
                 }
 
-                // Remove the process info from the map
+                // Remove the entire entry
                 if (self.profile_process_info.fetchRemove(profile)) |kv| {
-                    // Free the process ID
-                    self.allocator.free(kv.value.pid);
-                    std.log.debug("Removed process info for profile {s}", .{profile.name});
+                    // Create a mutable copy to call deinit
+                    var mutable_info = kv.value;
+                    mutable_info.deinit();
+                    std.log.debug("Removed last instance of profile {s}", .{profile.name});
                 }
 
                 if (self.queued_profiles.items.len > 0) {
@@ -223,21 +281,30 @@ pub const ProfileManager = struct {
             const uid = scriptrunner.findUserForProcess(pid) catch null;
 
             // Check if we already have an entry for this profile
-            if (self.profile_process_info.get(match.?)) |old_info| {
-                // Free the old process ID
-                self.allocator.free(old_info.pid);
-            }
+            if (self.profile_process_info.getPtr(match.?)) |process_info| {
+                // Add the new PID to the existing entry
+                try process_info.pids.append(pid_copy);
 
-            // Store the process info in the map
-            const process_info = ProfileProcessInfo{
-                .pid = pid_copy,
-                .uid = uid,
-            };
-            self.profile_process_info.put(match.?, process_info) catch |err| {
-                std.log.err("Failed to store process info for profile {s}: {}", .{ match.?.name, err });
-                // Free the pid_copy if we couldn't store it
-                self.allocator.free(pid_copy);
-            };
+                // Update UID if it was null before
+                if (process_info.uid == null) {
+                    process_info.uid = uid;
+                }
+
+                std.log.info("Added another instance of profile {s}, now {d} instances", .{ match.?.name, process_info.pids.items.len });
+            } else {
+                // Create a new entry for this profile
+                var process_info = ProfileProcessInfo.init(self.allocator);
+                try process_info.pids.append(pid_copy);
+                process_info.uid = uid;
+
+                self.profile_process_info.put(match.?, process_info) catch |err| {
+                    std.log.err("Failed to store process info for profile {s}: {}", .{ match.?.name, err });
+                    // Free the pid_copy and the process_info if we couldn't store it
+                    process_info.deinit();
+                };
+
+                std.log.info("Created new profile instance for {s}", .{match.?.name});
+            }
         }
 
         // Check if we have a match for an .exe file (not Proton) and Proton is currently active

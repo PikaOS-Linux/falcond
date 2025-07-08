@@ -309,8 +309,9 @@ pub const Daemon = struct {
 
                         if (self.profile_manager.active_profile) |active| {
                             if (active == profile) {
-                                std.log.info("Process {s} has terminated", .{profile.name});
-                                try self.profile_manager.deactivateProfile(active);
+                                std.log.info("Process {s} instance has terminated", .{profile.name});
+                                const pid_str = try std.fmt.allocPrint(arena_allocator, "{d}", .{pid});
+                                try self.profile_manager.deactivateProfile(active, pid_str);
                                 found_profile = true;
                             }
                         }
