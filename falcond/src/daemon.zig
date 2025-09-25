@@ -147,8 +147,6 @@ pub const Daemon = struct {
         var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
             if (err != error.FileNotFound) {
                 std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
-            } else {
-                std.log.debug("User profiles directory not found: {s}", .{user_profiles_path});
             }
 
             if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
@@ -199,7 +197,7 @@ pub const Daemon = struct {
 
             try self.handleProcesses();
 
-            std.time.sleep(std.time.ns_per_s * 9);
+            std.Thread.sleep(std.time.ns_per_s * 9);
         }
     }
 
