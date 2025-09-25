@@ -26,8 +26,8 @@ pub fn loadConf(comptime T: type, allocator: std.mem.Allocator, path: []const u8
     };
 }
 
-pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayList(T) {
-    var result = std.ArrayList(T).init(allocator);
+pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []const u8) !std.array_list.Managed(T) {
+    var result = std.array_list.Managed(T).init(allocator);
     errdefer result.deinit();
 
     var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });

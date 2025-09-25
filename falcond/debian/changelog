@@ -1,3 +1,9 @@
+falcond (1.1.8-101pika1) pika; urgency=low
+
+  * Zig 0.15.1 support, scx cosmos added
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 08 Jul 2025 22:21:39 +0300
+
 falcond (1.1.7-101pika1) pika; urgency=low
 
   * Fix profile activation/deactivation when multiple instances of the same profile are running

@@ -10,12 +10,12 @@ const scx_scheds = @import("../clients/scx_scheds.zig");
 const scriptrunner = @import("../clients/scriptrunner.zig");
 
 pub const ProfileProcessInfo = struct {
-    pids: std.ArrayList([]const u8),
+    pids: std.array_list.Managed([]const u8),
     uid: ?os.linux.uid_t,
 
     pub fn init(allocator: std.mem.Allocator) ProfileProcessInfo {
         return .{
-            .pids = std.ArrayList([]const u8).init(allocator),
+            .pids = std.array_list.Managed([]const u8).init(allocator),
             .uid = null,
         };
     }
@@ -41,10 +41,10 @@ pub const ProfileProcessInfo = struct {
 pub const ProfileManager = struct {
     comptime profiles_dir: []const u8 = "/usr/share/falcond/profiles",
     allocator: std.mem.Allocator,
-    profiles: std.ArrayList(Profile),
+    profiles: std.array_list.Managed(Profile),
     proton_profile: ?*const Profile,
     active_profile: ?*const Profile = null,
-    queued_profiles: std.ArrayList(*const Profile),
+    queued_profiles: std.array_list.Managed(*const Profile),
     power_profiles: ?*PowerProfiles,
     config: Config,
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
@@ -53,9 +53,9 @@ pub const ProfileManager = struct {
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
         return .{
             .allocator = allocator,
-            .profiles = std.ArrayList(Profile).init(allocator),
+            .profiles = std.array_list.Managed(Profile).init(allocator),
             .proton_profile = null,
-            .queued_profiles = std.ArrayList(*const Profile).init(allocator),
+            .queued_profiles = std.array_list.Managed(*const Profile).init(allocator),
             .power_profiles = power_profiles,
             .config = config,
             .profile_process_info = std.AutoHashMap(*const Profile, ProfileProcessInfo).init(allocator),

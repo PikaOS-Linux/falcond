@@ -77,9 +77,14 @@ pub const Config = struct {
         const file = try fs.createFileAbsolute(path, .{});
         defer file.close();
 
-        try file.writer().print("enable_performance_mode = {}\n", .{self.enable_performance_mode});
-        try file.writer().print("scx_sched = {s}\n", .{@tagName(self.scx_sched)});
-        try file.writer().print("vcache_mode = {s}\n", .{@tagName(self.vcache_mode)});
-        try file.writer().print("profile_mode = {s}\n", .{@tagName(self.profile_mode)});
+        var writer_buffer: [256]u8 = undefined;
+        var file_writer = file.writer(&writer_buffer);
+        const writer = &file_writer.interface;
+
+        try writer.print("enable_performance_mode = {}\n", .{self.enable_performance_mode});
+        try writer.print("scx_sched = {s}\n", .{@tagName(self.scx_sched)});
+        try writer.print("vcache_mode = {s}\n", .{@tagName(self.vcache_mode)});
+        try writer.print("profile_mode = {s}\n", .{@tagName(self.profile_mode)});
+        try writer.flush();
     }
 };

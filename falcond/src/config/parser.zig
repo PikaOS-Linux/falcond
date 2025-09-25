@@ -84,7 +84,7 @@ pub fn Parser(comptime T: type) type {
 
             self.pos += 1;
             var escaped = false;
-            var result = std.ArrayList(u8).init(self.allocator);
+            var result = std.array_list.Managed(u8).init(self.allocator);
             errdefer result.deinit();
 
             const start_pos = self.pos;
@@ -171,7 +171,7 @@ pub fn Parser(comptime T: type) type {
                 return error.InvalidSyntax;
 
             self.pos += 1;
-            var values = std.ArrayList([]const u8).init(self.allocator);
+            var values = std.array_list.Managed([]const u8).init(self.allocator);
             errdefer {
                 for (values.items) |str| {
                     self.allocator.free(str);

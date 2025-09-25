@@ -76,7 +76,7 @@ pub const PowerProfiles = struct {
     }
 
     pub fn getAvailableProfiles(self: *PowerProfiles, alloc: std.mem.Allocator) ![]const []const u8 {
-        var result = std.ArrayList([]const u8).init(alloc);
+        var result = std.array_list.Managed([]const u8).init(alloc);
         errdefer {
             for (result.items) |item| {
                 alloc.free(item);

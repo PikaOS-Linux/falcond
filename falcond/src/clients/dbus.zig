@@ -108,7 +108,7 @@ pub const DBus = struct {
 
     /// Get a property value as a string array
     pub fn getPropertyArray(self: *const DBus, property: []const u8) ![][]const u8 {
-        var result = std.ArrayList([]const u8).init(self.allocator);
+        var result = std.array_list.Managed([]const u8).init(self.allocator);
         errdefer {
             for (result.items) |item| {
                 self.allocator.free(item);
@@ -185,7 +185,7 @@ pub const DBus = struct {
 
     /// Call a DBus method
     pub fn callMethod(self: *const DBus, method: []const u8, args: []const []const u8) !void {
-        var argv = std.ArrayList([]const u8).init(self.allocator);
+        var argv = std.array_list.Managed([]const u8).init(self.allocator);
         defer argv.deinit();
 
         try argv.appendSlice(&[_][]const u8{

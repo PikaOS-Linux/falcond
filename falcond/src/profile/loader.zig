@@ -4,7 +4,7 @@ const types = @import("types.zig");
 const Profile = types.Profile;
 const ProfileMode = @import("../config/config.zig").ProfileMode;
 
-pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayList(Profile), proton_profile: *?*const Profile, oneshot: bool, mode: ProfileMode) !void {
+pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.array_list.Managed(Profile), proton_profile: *?*const Profile, oneshot: bool, mode: ProfileMode) !void {
     if (oneshot) {
         try profiles.append(Profile{
             .name = try allocator.dupe(u8, "Hades3.exe"),
