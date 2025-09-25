@@ -22,6 +22,7 @@ pub const ScxScheduler = enum {
     vder,
     p2dq,
     tickless,
+    cosmos,
     none,
 
     pub fn toScxName(self: ScxScheduler) []const u8 {
@@ -53,6 +54,7 @@ pub const ScxScheduler = enum {
         if (std.mem.eql(u8, str, "scx_vder")) return .vder;
         if (std.mem.eql(u8, str, "scx_p2dq")) return .p2dq;
         if (std.mem.eql(u8, str, "scx_tickless")) return .tickless;
+        if (std.mem.eql(u8, str, "scx_cosmos")) return .cosmos;
 
         return error.InvalidValue;
     }
@@ -176,7 +178,7 @@ pub fn getSupportedSchedulers(alloc: std.mem.Allocator) ![]ScxScheduler {
         alloc.free(schedulers);
     }
 
-    var result = try std.ArrayList(ScxScheduler).initCapacity(alloc, schedulers.len);
+    var result = try std.array_list.Managed(ScxScheduler).initCapacity(alloc, schedulers.len);
     errdefer result.deinit();
 
     for (schedulers) |s| {
