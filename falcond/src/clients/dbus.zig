@@ -108,12 +108,12 @@ pub const DBus = struct {
 
     /// Get a property value as a string array
     pub fn getPropertyArray(self: *const DBus, property: []const u8) ![][]const u8 {
-        var result = std.array_list.Managed([]const u8).init(self.allocator);
+        var result = std.ArrayListUnmanaged([]const u8){};
         errdefer {
             for (result.items) |item| {
                 self.allocator.free(item);
             }
-            result.deinit();
+            result.deinit(self.allocator);
         }
 
         const argv = [_][]const u8{
@@ -148,10 +148,10 @@ pub const DBus = struct {
         while (it.next()) |value| {
             // Skip empty strings and spaces between quotes
             if (value.len == 0 or std.mem.eql(u8, std.mem.trim(u8, value, " "), "")) continue;
-            try result.append(try self.allocator.dupe(u8, value));
+            try result.append(self.allocator, try self.allocator.dupe(u8, value));
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(self.allocator);
     }
 
     /// Set a property value
@@ -185,10 +185,10 @@ pub const DBus = struct {
 
     /// Call a DBus method
     pub fn callMethod(self: *const DBus, method: []const u8, args: []const []const u8) !void {
-        var argv = std.array_list.Managed([]const u8).init(self.allocator);
-        defer argv.deinit();
+        var argv = std.ArrayListUnmanaged([]const u8){};
+        defer argv.deinit(self.allocator);
 
-        try argv.appendSlice(&[_][]const u8{
+        try argv.appendSlice(self.allocator, &[_][]const u8{
             "busctl",
             "--system",
             "call",
@@ -198,7 +198,7 @@ pub const DBus = struct {
             method,
         });
 
-        try argv.appendSlice(args);
+        try argv.appendSlice(self.allocator, args);
 
         const result = try std.process.Child.run(.{
             .allocator = self.allocator,

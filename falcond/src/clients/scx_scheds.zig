@@ -178,18 +178,18 @@ pub fn getSupportedSchedulers(alloc: std.mem.Allocator) ![]ScxScheduler {
         alloc.free(schedulers);
     }
 
-    var result = try std.array_list.Managed(ScxScheduler).initCapacity(alloc, schedulers.len);
-    errdefer result.deinit();
+    var result = try std.ArrayListUnmanaged(ScxScheduler).initCapacity(alloc, schedulers.len);
+    errdefer result.deinit(alloc);
 
     for (schedulers) |s| {
         const scheduler = ScxScheduler.fromString(s) catch |err| {
             std.log.warn("Skipping unknown scheduler: {s}, error: {}", .{ s, err });
             continue;
         };
-        try result.append(scheduler);
+        try result.append(alloc, scheduler);
     }
 
-    return result.toOwnedSlice();
+    return result.toOwnedSlice(alloc);
 }
 
 pub fn storePreviousState(alloc: std.mem.Allocator) !void {

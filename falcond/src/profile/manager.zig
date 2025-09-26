@@ -10,21 +10,21 @@ const scx_scheds = @import("../clients/scx_scheds.zig");
 const scriptrunner = @import("../clients/scriptrunner.zig");
 
 pub const ProfileProcessInfo = struct {
-    pids: std.array_list.Managed([]const u8),
+    pids: std.ArrayListUnmanaged([]const u8),
     uid: ?os.linux.uid_t,
 
-    pub fn init(allocator: std.mem.Allocator) ProfileProcessInfo {
+    pub fn init() ProfileProcessInfo {
         return .{
-            .pids = std.array_list.Managed([]const u8).init(allocator),
+            .pids = std.ArrayListUnmanaged([]const u8){},
             .uid = null,
         };
     }
 
-    pub fn deinit(self: *ProfileProcessInfo) void {
+    pub fn deinit(self: *ProfileProcessInfo, allocator: std.mem.Allocator) void {
         for (self.pids.items) |pid| {
-            self.pids.allocator.free(pid);
+            allocator.free(pid);
         }
-        self.pids.deinit();
+        self.pids.deinit(allocator);
     }
 
     pub fn removePid(self: *ProfileProcessInfo, allocator: std.mem.Allocator, pid_to_remove: []const u8) bool {
@@ -41,10 +41,10 @@ pub const ProfileProcessInfo = struct {
 pub const ProfileManager = struct {
     comptime profiles_dir: []const u8 = "/usr/share/falcond/profiles",
     allocator: std.mem.Allocator,
-    profiles: std.array_list.Managed(Profile),
+    profiles: std.ArrayListUnmanaged(Profile),
     proton_profile: ?*const Profile,
     active_profile: ?*const Profile = null,
-    queued_profiles: std.array_list.Managed(*const Profile),
+    queued_profiles: std.ArrayListUnmanaged(*const Profile),
     power_profiles: ?*PowerProfiles,
     config: Config,
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
@@ -53,9 +53,9 @@ pub const ProfileManager = struct {
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
         return .{
             .allocator = allocator,
-            .profiles = std.array_list.Managed(Profile).init(allocator),
+            .profiles = std.ArrayListUnmanaged(Profile){},
             .proton_profile = null,
-            .queued_profiles = std.array_list.Managed(*const Profile).init(allocator),
+            .queued_profiles = std.ArrayListUnmanaged(*const Profile){},
             .power_profiles = power_profiles,
             .config = config,
             .profile_process_info = std.AutoHashMap(*const Profile, ProfileProcessInfo).init(allocator),
@@ -101,7 +101,7 @@ pub const ProfileManager = struct {
         self.file_count = count;
     }
 
-    pub fn deinit(self: *ProfileManager) void {
+    pub fn deinit(self: *ProfileManager, allocator: std.mem.Allocator) void {
         if (self.active_profile) |profile| {
             self.deactivateProfile(profile, null) catch |err| {
                 std.log.err("Failed to deactivate profile: {}", .{err});
@@ -111,15 +111,15 @@ pub const ProfileManager = struct {
         // Free all process IDs stored in the map
         var it = self.profile_process_info.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.deinit();
+            entry.value_ptr.deinit(allocator);
         }
         self.profile_process_info.deinit();
 
         for (self.profiles.items) |profile| {
             self.allocator.free(profile.name);
         }
-        self.profiles.deinit();
-        self.queued_profiles.deinit();
+        self.profiles.deinit(allocator);
+        self.queued_profiles.deinit(allocator);
     }
 
     pub fn activateProfile(self: *ProfileManager, profile: *const Profile) !void {
@@ -170,7 +170,7 @@ pub const ProfileManager = struct {
                 return;
             }
             std.log.info("Queueing profile: {s} (active: {s})", .{ profile.name, self.active_profile.?.name });
-            try self.queued_profiles.append(profile);
+            try self.queued_profiles.append(self.allocator, profile);
         }
     }
 
@@ -229,7 +229,7 @@ pub const ProfileManager = struct {
                 if (self.profile_process_info.fetchRemove(profile)) |kv| {
                     // Create a mutable copy to call deinit
                     var mutable_info = kv.value;
-                    mutable_info.deinit();
+                    mutable_info.deinit(self.allocator);
                     std.log.debug("Removed last instance of profile {s}", .{profile.name});
                 }
 
@@ -283,7 +283,7 @@ pub const ProfileManager = struct {
             // Check if we already have an entry for this profile
             if (self.profile_process_info.getPtr(match.?)) |process_info| {
                 // Add the new PID to the existing entry
-                try process_info.pids.append(pid_copy);
+                try process_info.pids.append(self.allocator, pid_copy);
 
                 // Update UID if it was null before
                 if (process_info.uid == null) {
@@ -293,14 +293,14 @@ pub const ProfileManager = struct {
                 std.log.info("Added another instance of profile {s}, now {d} instances", .{ match.?.name, process_info.pids.items.len });
             } else {
                 // Create a new entry for this profile
-                var process_info = ProfileProcessInfo.init(self.allocator);
-                try process_info.pids.append(pid_copy);
+                var process_info = ProfileProcessInfo.init();
+                try process_info.pids.append(self.allocator, pid_copy);
                 process_info.uid = uid;
 
                 self.profile_process_info.put(match.?, process_info) catch |err| {
                     std.log.err("Failed to store process info for profile {s}: {}", .{ match.?.name, err });
                     // Free the pid_copy and the process_info if we couldn't store it
-                    process_info.deinit();
+                    process_info.deinit(self.allocator);
                 };
 
                 std.log.info("Created new profile instance for {s}", .{match.?.name});
@@ -331,7 +331,7 @@ pub const ProfileManager = struct {
                 self.active_profile = null;
 
                 // Add Proton to the front of the queue
-                try self.queued_profiles.insert(0, proton);
+                try self.queued_profiles.insert(self.allocator, 0, proton);
                 std.log.info("Added Proton profile to front of queue", .{});
             }
 

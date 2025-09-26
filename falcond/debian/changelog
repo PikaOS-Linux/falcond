@@ -1,3 +1,9 @@
+falcond (1.1.9-101pika1) pika; urgency=low
+
+  * Swap ArrayList.Managed to ArrayListUnmanaged due to future deprecations in Zig.
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 08 Jul 2025 22:21:39 +0300
+
 falcond (1.1.8-101pika1) pika; urgency=low
 
   * Zig 0.15.1 support, scx cosmos added

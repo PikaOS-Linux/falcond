@@ -76,12 +76,12 @@ pub const PowerProfiles = struct {
     }
 
     pub fn getAvailableProfiles(self: *PowerProfiles, alloc: std.mem.Allocator) ![]const []const u8 {
-        var result = std.array_list.Managed([]const u8).init(alloc);
+        var result = std.ArrayListUnmanaged([]const u8){};
         errdefer {
             for (result.items) |item| {
                 alloc.free(item);
             }
-            result.deinit();
+            result.deinit(alloc);
         }
 
         const profiles_raw = try self.dbus.getPropertyArray("Profiles");
@@ -97,12 +97,12 @@ pub const PowerProfiles = struct {
             const item = profiles_raw[i];
             if (std.mem.eql(u8, item, "Profile")) {
                 if (i + 2 < profiles_raw.len) {
-                    try result.append(try alloc.dupe(u8, profiles_raw[i + 2]));
+                    try result.append(alloc, try alloc.dupe(u8, profiles_raw[i + 2]));
                 }
             }
         }
 
-        return result.toOwnedSlice();
+        return result.toOwnedSlice(alloc);
     }
 
     pub fn enablePerformanceMode(self: *PowerProfiles) void {

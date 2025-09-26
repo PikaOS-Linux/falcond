@@ -84,19 +84,19 @@ pub fn Parser(comptime T: type) type {
 
             self.pos += 1;
             var escaped = false;
-            var result = std.array_list.Managed(u8).init(self.allocator);
-            errdefer result.deinit();
+            var result = std.ArrayListUnmanaged(u8){};
+            errdefer result.deinit(self.allocator);
 
             const start_pos = self.pos;
             while (self.pos < self.content.len) : (self.pos += 1) {
                 const c = self.content[self.pos];
                 if (escaped) {
                     switch (c) {
-                        '"' => try result.append('"'),
-                        '\\' => try result.append('\\'),
-                        'n' => try result.append('\n'),
-                        'r' => try result.append('\r'),
-                        't' => try result.append('\t'),
+                        '"' => try result.append(self.allocator, '"'),
+                        '\\' => try result.append(self.allocator, '\\'),
+                        'n' => try result.append(self.allocator, '\n'),
+                        'r' => try result.append(self.allocator, '\r'),
+                        't' => try result.append(self.allocator, '\t'),
                         else => {
                             std.log.err("Invalid escape sequence '\\{c}' at position {}", .{ c, self.pos });
                             return error.InvalidSyntax;
@@ -108,12 +108,12 @@ pub fn Parser(comptime T: type) type {
                 switch (c) {
                     '"' => {
                         self.pos += 1;
-                        return result.toOwnedSlice();
+                        return result.toOwnedSlice(self.allocator);
                     },
                     '\\' => {
                         escaped = true;
                     },
-                    else => try result.append(c),
+                    else => try result.append(self.allocator, c),
                 }
             }
 
@@ -171,26 +171,26 @@ pub fn Parser(comptime T: type) type {
                 return error.InvalidSyntax;
 
             self.pos += 1;
-            var values = std.array_list.Managed([]const u8).init(self.allocator);
+            var values = std.ArrayListUnmanaged([]const u8){};
             errdefer {
                 for (values.items) |str| {
                     self.allocator.free(str);
                 }
-                values.deinit();
+                values.deinit(self.allocator);
             }
 
             while (self.pos < self.content.len) {
                 self.skipWhitespace();
                 if (self.content[self.pos] == ']') {
                     self.pos += 1;
-                    return values.toOwnedSlice();
+                    return values.toOwnedSlice(self.allocator);
                 }
 
                 const str = self.parseString() catch |err| {
                     std.log.err("Failed to parse string at position {}: {s}", .{ self.pos, @errorName(err) });
                     return err;
                 };
-                try values.append(str);
+                try values.append(self.allocator, str);
 
                 self.skipWhitespace();
                 if (self.content[self.pos] == ',') {
@@ -199,7 +199,7 @@ pub fn Parser(comptime T: type) type {
                 }
                 if (self.content[self.pos] == ']') {
                     self.pos += 1;
-                    return values.toOwnedSlice();
+                    return values.toOwnedSlice(self.allocator);
                 }
                 std.log.err("Expected ',' or ']' but found '{c}' at position {}", .{ self.content[self.pos], self.pos });
                 return error.InvalidSyntax;

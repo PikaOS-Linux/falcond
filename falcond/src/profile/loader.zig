@@ -4,15 +4,15 @@ const types = @import("types.zig");
 const Profile = types.Profile;
 const ProfileMode = @import("../config/config.zig").ProfileMode;
 
-pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.array_list.Managed(Profile), proton_profile: *?*const Profile, oneshot: bool, mode: ProfileMode) !void {
+pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayListUnmanaged(Profile), proton_profile: *?*const Profile, oneshot: bool, mode: ProfileMode) !void {
     if (oneshot) {
-        try profiles.append(Profile{
+        try profiles.append(allocator, Profile{
             .name = try allocator.dupe(u8, "Hades3.exe"),
             .scx_sched = .bpfland,
         });
         std.log.info("Loaded oneshot profile: Hades3.exe", .{});
 
-        try profiles.append(Profile{
+        try profiles.append(allocator, Profile{
             .name = try allocator.dupe(u8, "Proton"),
             .scx_sched = .none,
         });
@@ -29,9 +29,9 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.array_list.Mana
         defer if (mode != .none) allocator.free(profiles_path);
 
         var loaded_profiles = try confloader.loadConfDir(Profile, allocator, profiles_path);
-        defer loaded_profiles.deinit();
+        defer loaded_profiles.deinit(allocator);
 
-        try profiles.appendSlice(loaded_profiles.items);
+        try profiles.appendSlice(allocator, loaded_profiles.items);
 
         const has_user_profiles = blk: {
             _ = std.fs.accessAbsolute(user_profiles_path, .{}) catch |err| {
@@ -48,7 +48,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.array_list.Mana
         var user_count: usize = 0;
         if (has_user_profiles) {
             var user_loaded_profiles = try confloader.loadConfDir(Profile, allocator, user_profiles_path);
-            defer user_loaded_profiles.deinit();
+            defer user_loaded_profiles.deinit(allocator);
             user_count = user_loaded_profiles.items.len;
             for (user_loaded_profiles.items) |user_profile| {
                 var found = false;
@@ -60,7 +60,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.array_list.Mana
                     }
                 }
                 if (!found) {
-                    try profiles.append(user_profile);
+                    try profiles.append(allocator, user_profile);
                 }
             }
         }

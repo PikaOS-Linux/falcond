@@ -71,7 +71,7 @@ pub const Daemon = struct {
 
     pub fn deinit(self: *Self) void {
         scx_scheds.deinit();
-        self.profile_manager.deinit();
+        self.profile_manager.deinit(self.allocator);
         if (self.power_profiles) |pp| {
             pp.*.deinit();
         }
@@ -93,7 +93,7 @@ pub const Daemon = struct {
             try self.profile_manager.unloadProfile(self.profile_manager.active_profile.?);
         }
 
-        self.profile_manager.deinit();
+        self.profile_manager.deinit(self.allocator);
         if (self.power_profiles) |pp| {
             pp.*.deinit();
         }

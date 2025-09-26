@@ -26,9 +26,9 @@ pub fn loadConf(comptime T: type, allocator: std.mem.Allocator, path: []const u8
     };
 }
 
-pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []const u8) !std.array_list.Managed(T) {
-    var result = std.array_list.Managed(T).init(allocator);
-    errdefer result.deinit();
+pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []const u8) !std.ArrayListUnmanaged(T) {
+    var result = std.ArrayListUnmanaged(T){};
+    errdefer result.deinit(allocator);
 
     var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
     defer dir.close();
@@ -50,7 +50,7 @@ pub fn loadConfDir(comptime T: type, allocator: std.mem.Allocator, dir_path: []c
                 std.log.err("Failed to parse config file '{s}': {s}", .{ path, @errorName(err) });
                 return err;
             };
-            try result.append(parsed);
+            try result.append(allocator, parsed);
         }
     }
 
