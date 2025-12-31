@@ -37,6 +37,17 @@ pub const StatusManager = struct {
         try writer.print("  Global SCX Scheduler: {s}\n", .{@tagName(config.scx_sched)});
         try writer.writeAll("\n");
 
+        try writer.writeAll("AVAILABLE_SCX_SCHEDULERS:\n");
+        const sched_list = @import("clients/scx_scheds.zig").getSupportedSchedulersList();
+        if (sched_list.len > 0) {
+            for (sched_list) |sched| {
+                try writer.print("  - {s}\n", .{sched.toScxName()});
+            }
+        } else {
+            try writer.writeAll("  (None or scx_loader unavailable)\n");
+        }
+        try writer.writeAll("\n");
+
         try writer.print("LOADED_PROFILES: {d}\n\n", .{profile_manager.profiles.items.len});
 
         try writer.writeAll("ACTIVE_PROFILE: ");
@@ -56,6 +67,31 @@ pub const StatusManager = struct {
             try writer.writeAll("  (None)\n");
         }
         try writer.writeAll("\n");
+
+        if (profile_manager.active_profile) |_| {
+            try writer.writeAll("RESTORE_STATE:\n");
+
+            // SCX Restore State
+            const scx_state = @import("clients/scx_scheds.zig").getPreviousState();
+            if (scx_state.scheduler) |s| {
+                const mode_str = if (scx_state.mode) |m| @tagName(m) else "default";
+                try writer.print("  SCX Scheduler: {s} (Mode: {s})\n", .{ s.toScxName(), mode_str });
+            } else {
+                try writer.writeAll("  SCX Scheduler: (None)\n");
+            }
+
+            // Power Profile Restore State
+            if (power_profiles) |pp| {
+                if (pp.original_profile) |orig| {
+                    try writer.print("  Power Profile: {s}\n", .{orig});
+                } else {
+                    try writer.writeAll("  Power Profile: (No change/None)\n");
+                }
+            } else {
+                try writer.writeAll("  Power Profile: (Unavailable)\n");
+            }
+            try writer.writeAll("\n");
+        }
 
         try writer.writeAll("CURRENT_STATUS:\n");
 
@@ -81,6 +117,12 @@ pub const StatusManager = struct {
         try writer.print("  VCache Mode: {s}\n", .{@tagName(effective_vcache)});
         const effective_scx = if (config.scx_sched != .none) config.scx_sched else if (profile_manager.active_profile) |p| p.scx_sched else .none;
         try writer.print("  SCX Scheduler: {s}\n", .{@tagName(effective_scx)});
+
+        if (profile_manager.inhibit_cookie != null) {
+            try writer.writeAll("  Screensaver Inhibit: Active\n");
+        } else {
+            try writer.writeAll("  Screensaver Inhibit: Inactive\n");
+        }
 
         try writer.writeAll("\n");
         try writer.flush();

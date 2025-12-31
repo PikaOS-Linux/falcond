@@ -10,6 +10,7 @@ pub const Profile = struct {
     vcache_mode: vcache_setting.VCacheMode = .cache,
     start_script: ?[]const u8 = null,
     stop_script: ?[]const u8 = null,
+    idle_inhibit: bool = false,
 
     pub fn matches(self: *const Profile, process_name: []const u8) bool {
         const is_match = std.ascii.eqlIgnoreCase(self.name, process_name);

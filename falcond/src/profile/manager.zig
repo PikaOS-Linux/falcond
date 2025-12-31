@@ -8,6 +8,7 @@ const Config = @import("../config/config.zig").Config;
 const vcache_setting = @import("../clients/vcache_setting.zig");
 const scx_scheds = @import("../clients/scx_scheds.zig");
 const scriptrunner = @import("../clients/scriptrunner.zig");
+const Screensaver = @import("../clients/screensaver.zig").Screensaver;
 
 pub const ProfileProcessInfo = struct {
     pids: std.ArrayListUnmanaged([]const u8),
@@ -49,8 +50,18 @@ pub const ProfileManager = struct {
     config: Config,
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
     file_count: usize = 0,
+    screensaver: ?*Screensaver = null,
+    inhibit_cookie: ?u32 = null,
+    inhibit_uid: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
+        var screensaver: ?*Screensaver = null;
+        if (Screensaver.init(allocator)) |ss| {
+            screensaver = ss;
+        } else |err| {
+            std.log.warn("Failed to initialize Screensaver client: {}, idle inhibition will be disabled", .{err});
+        }
+
         return .{
             .allocator = allocator,
             .profiles = std.ArrayListUnmanaged(Profile){},
@@ -59,6 +70,7 @@ pub const ProfileManager = struct {
             .power_profiles = power_profiles,
             .config = config,
             .profile_process_info = std.AutoHashMap(*const Profile, ProfileProcessInfo).init(allocator),
+            .screensaver = screensaver,
         };
     }
 
@@ -115,6 +127,10 @@ pub const ProfileManager = struct {
         }
         self.profile_process_info.deinit();
 
+        if (self.screensaver) |ss| {
+            ss.deinit();
+        }
+
         for (self.profiles.items) |profile| {
             self.allocator.free(profile.name);
         }
@@ -137,6 +153,19 @@ pub const ProfileManager = struct {
             else
                 profile.vcache_mode;
             vcache_setting.applyVCacheMode(effective_mode);
+
+            if (profile.idle_inhibit and self.screensaver != null) {
+                const info = self.profile_process_info.get(profile);
+                const uid = if (info) |i| i.uid else null;
+
+                if (self.screensaver.?.inhibit("falcond", "Gaming Profile Active", uid)) |cookie| {
+                    self.inhibit_cookie = cookie;
+                    self.inhibit_uid = uid;
+                    std.log.info("Inhibited screensaver (cookie: {d})", .{cookie});
+                } else |err| {
+                    std.log.err("Failed to inhibit screensaver: {}", .{err});
+                }
+            }
 
             const effective_sched = if (self.config.scx_sched == .none)
                 profile.scx_sched
@@ -203,6 +232,17 @@ pub const ProfileManager = struct {
                     self.power_profiles.?.disablePerformanceMode();
                 }
 
+                if (self.inhibit_cookie) |cookie| {
+                    if (self.screensaver) |ss| {
+                        ss.uninhibit(cookie, self.inhibit_uid) catch |err| {
+                            std.log.err("Failed to uninhibit screensaver: {}", .{err});
+                        };
+                        std.log.info("Uninhibited screensaver", .{});
+                    }
+                    self.inhibit_cookie = null;
+                    self.inhibit_uid = null;
+                }
+
                 vcache_setting.applyVCacheMode(.none);
                 scx_scheds.restorePreviousState(self.allocator);
                 self.active_profile = null;
@@ -260,6 +300,17 @@ pub const ProfileManager = struct {
                 if (profile.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
                     std.log.info("Disabling performance mode for profile: {s}", .{profile.name});
                     self.power_profiles.?.disablePerformanceMode();
+                }
+
+                if (self.inhibit_cookie) |cookie| {
+                    if (self.screensaver) |ss| {
+                        ss.uninhibit(cookie, self.inhibit_uid) catch |err| {
+                            std.log.err("Failed to uninhibit screensaver: {}", .{err});
+                        };
+                        std.log.info("Uninhibited screensaver", .{});
+                    }
+                    self.inhibit_cookie = null;
+                    self.inhibit_uid = null;
                 }
 
                 vcache_setting.applyVCacheMode(.none);
@@ -324,6 +375,17 @@ pub const ProfileManager = struct {
                 if (proton.performance_mode and self.power_profiles != null and self.power_profiles.?.isPerformanceAvailable()) {
                     std.log.info("Disabling performance mode for Proton profile", .{});
                     self.power_profiles.?.disablePerformanceMode();
+                }
+
+                if (self.inhibit_cookie) |cookie| {
+                    if (self.screensaver) |ss| {
+                        ss.uninhibit(cookie, self.inhibit_uid) catch |err| {
+                            std.log.err("Failed to uninhibit screensaver: {}", .{err});
+                        };
+                        std.log.info("Uninhibited screensaver", .{});
+                    }
+                    self.inhibit_cookie = null;
+                    self.inhibit_uid = null;
                 }
 
                 vcache_setting.applyVCacheMode(.none);

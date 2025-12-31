@@ -88,6 +88,7 @@ stop_script = "notify-send 'game stopped'"
 - `vcache_mode`: VCache management mode (options: none, cache, freq)
 - `start_script`: Script to run when the game starts
 - `stop_script`: Script to run when the game stops
+- `idle_inhibit`: Prevent screensaver/idle while game is running (default: false)
 
 ## Service Management
 
@@ -99,6 +100,52 @@ sudo systemctl restart falcond
 To check the status:
 ```
 sudo systemctl status falcond
+```
+
+## Monitoring
+
+You can check the detailed status of falcond by reading the status file:
+
+```bash
+cat /var/lib/falcond/status
+```
+
+Example output:
+```
+FEATURES:
+  Performance Mode: Available
+
+CONFIG:
+  Profile Mode: none
+  Global VCache Mode: none
+  Global SCX Scheduler: none
+
+AVAILABLE_SCX_SCHEDULERS:
+  - scx_bpfland
+  - scx_cosmos
+  - scx_flash
+  - scx_lavd
+  - scx_p2dq
+  - scx_tickless
+  - scx_rustland
+  - scx_rusty
+
+LOADED_PROFILES: 7
+
+ACTIVE_PROFILE: cs2
+
+QUEUED_PROFILES:
+  (None)
+
+RESTORE_STATE:
+  SCX Scheduler: (None)
+  Power Profile: power-saver
+
+CURRENT_STATUS:
+  Performance Mode: Active
+  VCache Mode: cache
+  SCX Scheduler: none
+  Screensaver Inhibit: Active
 ```
 
 ## Source Code

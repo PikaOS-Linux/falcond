@@ -103,6 +103,14 @@ pub fn init(alloc: std.mem.Allocator) !void {
     }
 }
 
+pub fn getSupportedSchedulersList() []ScxScheduler {
+    return supported_schedulers;
+}
+
+pub fn getPreviousState() State {
+    return previous_state;
+}
+
 pub fn deinit() void {
     if (supported_schedulers.len > 0) {
         allocator.free(supported_schedulers);
@@ -240,7 +248,8 @@ pub fn activateScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode
         mode_str,
     };
 
-    try dbus_conn.callMethod("SwitchScheduler", &args);
+    const result = try dbus_conn.callMethod("SwitchScheduler", &args);
+    alloc.free(result);
 }
 
 pub fn applyScheduler(alloc: std.mem.Allocator, scheduler: ScxScheduler, mode: ?ScxSchedModes) void {
@@ -293,7 +302,8 @@ fn runSystemCtl(alloc: std.mem.Allocator, command: []const u8, service: []const 
 pub fn deactivateScheduler(alloc: std.mem.Allocator) ScxError!void {
     runSystemCtl(alloc, "start", "ananicy-cpp");
     var dbus_conn = dbus.DBus.init(alloc, SCX_NAME, SCX_PATH, SCX_IFACE);
-    try dbus_conn.callMethod("StopScheduler", &[_][]const u8{});
+    const result = try dbus_conn.callMethod("StopScheduler", &[_][]const u8{});
+    alloc.free(result);
 }
 
 pub fn restorePreviousState(alloc: std.mem.Allocator) void {

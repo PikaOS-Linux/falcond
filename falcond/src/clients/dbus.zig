@@ -39,6 +39,8 @@ pub const DBus = struct {
     bus_name: []const u8,
     object_path: []const u8,
     interface: []const u8,
+    is_system: bool,
+    target_uid: ?u32,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -51,14 +53,67 @@ pub const DBus = struct {
             .bus_name = bus_name,
             .object_path = object_path,
             .interface = interface,
+            .is_system = true,
+            .target_uid = null,
         };
+    }
+
+    pub fn initSession(
+        allocator: std.mem.Allocator,
+        bus_name: []const u8,
+        object_path: []const u8,
+        interface: []const u8,
+    ) DBus {
+        return .{
+            .allocator = allocator,
+            .bus_name = bus_name,
+            .object_path = object_path,
+            .interface = interface,
+            .is_system = false,
+            .target_uid = null,
+        };
+    }
+
+    pub fn withUser(self: DBus, uid: ?u32) DBus {
+        var copy = self;
+        copy.target_uid = uid;
+        return copy;
+    }
+
+    fn runBusctl(self: *const DBus, args: []const []const u8) !std.process.Child.RunResult {
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        var argv = std.ArrayListUnmanaged([]const u8){};
+
+        if (!self.is_system and self.target_uid != null) {
+            try argv.append(alloc, "sudo");
+            try argv.append(alloc, "-u");
+            try argv.append(alloc, try std.fmt.allocPrint(alloc, "#{d}", .{self.target_uid.?}));
+            try argv.append(alloc, try std.fmt.allocPrint(alloc, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{d}/bus", .{self.target_uid.?}));
+        }
+
+        try argv.append(alloc, "busctl");
+        if (self.is_system) {
+            try argv.append(alloc, "--system");
+        } else {
+            try argv.append(alloc, "--user");
+        }
+
+        try argv.appendSlice(alloc, args);
+
+        const max_output_size = 1024 * 1024; // 1MB
+        return std.process.Child.run(.{
+            .allocator = self.allocator,
+            .argv = argv.items,
+            .max_output_bytes = max_output_size,
+        });
     }
 
     /// Get a property value as a string
     pub fn getProperty(self: *const DBus, property: []const u8) ![]const u8 {
-        var argv = [_][]const u8{
-            "busctl",
-            "--system",
+        const args = [_][]const u8{
             "get-property",
             self.bus_name,
             self.object_path,
@@ -66,12 +121,7 @@ pub const DBus = struct {
             property,
         };
 
-        const max_output_size = 1024 * 1024; // 1MB should be enough
-        const output = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = max_output_size,
-        });
+        const output = try self.runBusctl(&args);
         defer self.allocator.free(output.stderr);
         defer self.allocator.free(output.stdout);
 
@@ -116,9 +166,7 @@ pub const DBus = struct {
             result.deinit(self.allocator);
         }
 
-        const argv = [_][]const u8{
-            "busctl",
-            "--system",
+        const args = [_][]const u8{
             "get-property",
             self.bus_name,
             self.object_path,
@@ -126,12 +174,7 @@ pub const DBus = struct {
             property,
         };
 
-        const max_output_size = 1024 * 1024; // 1MB should be enough
-        const output = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = max_output_size,
-        });
+        const output = try self.runBusctl(&args);
         defer self.allocator.free(output.stderr);
         defer self.allocator.free(output.stdout);
 
@@ -156,9 +199,7 @@ pub const DBus = struct {
 
     /// Set a property value
     pub fn setProperty(self: *const DBus, property: []const u8, value: []const u8) !void {
-        const argv = [_][]const u8{
-            "busctl",
-            "--system",
+        const args = [_][]const u8{
             "set-property",
             self.bus_name,
             self.object_path,
@@ -168,12 +209,7 @@ pub const DBus = struct {
             value,
         };
 
-        const max_output_size = 1024; // Small size since we don't expect much output
-        const output = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = max_output_size,
-        });
+        const output = try self.runBusctl(&args);
         defer self.allocator.free(output.stderr);
         defer self.allocator.free(output.stdout);
 
@@ -183,14 +219,13 @@ pub const DBus = struct {
         }
     }
 
-    /// Call a DBus method
-    pub fn callMethod(self: *const DBus, method: []const u8, args: []const []const u8) !void {
-        var argv = std.ArrayListUnmanaged([]const u8){};
-        defer argv.deinit(self.allocator);
+    /// Call a DBus method and return the output (stdout)
+    /// Caller owns the returned memory
+    pub fn callMethod(self: *const DBus, method: []const u8, args: []const []const u8) ![]u8 {
+        var call_args = std.ArrayListUnmanaged([]const u8){};
+        defer call_args.deinit(self.allocator);
 
-        try argv.appendSlice(self.allocator, &[_][]const u8{
-            "busctl",
-            "--system",
+        try call_args.appendSlice(self.allocator, &[_][]const u8{
             "call",
             self.bus_name,
             self.object_path,
@@ -198,18 +233,19 @@ pub const DBus = struct {
             method,
         });
 
-        try argv.appendSlice(self.allocator, args);
+        if (args.len > 0) {
+            try call_args.appendSlice(self.allocator, args);
+        }
 
-        const result = try std.process.Child.run(.{
-            .allocator = self.allocator,
-            .argv = argv.items,
-        });
-        defer self.allocator.free(result.stderr);
-        defer self.allocator.free(result.stdout);
+        const output = try self.runBusctl(call_args.items);
+        defer self.allocator.free(output.stderr);
 
-        if (result.term.Exited != 0) {
-            std.log.err("busctl failed: {s}", .{result.stderr});
+        if (output.term.Exited != 0) {
+            std.log.err("busctl failed: {s}", .{output.stderr});
+            self.allocator.free(output.stdout);
             return DBusError.CommandFailed;
         }
+
+        return output.stdout;
     }
 };
