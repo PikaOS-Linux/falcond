@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const posix = std.posix;
 const PowerProfiles = @import("clients/power_profiles.zig").PowerProfiles;
 const scx_scheds = @import("clients/scx_scheds.zig");
+const StatusManager = @import("status.zig").StatusManager;
 
 pub const Daemon = struct {
     allocator: std.mem.Allocator,
@@ -66,6 +67,11 @@ pub const Daemon = struct {
 
         try self.profile_manager.updateFileCount(null);
 
+        // Initial status update
+        StatusManager.update(allocator, config, &profile_manager, power_profiles) catch |err| {
+            std.log.err("Failed to update status file: {}", .{err});
+        };
+
         return self;
     }
 
@@ -110,6 +116,8 @@ pub const Daemon = struct {
         self.profile_manager = profile_manager;
 
         try self.profile_manager.updateFileCount(null);
+
+        try self.updateStatus();
     }
 
     fn checkConfigChanges(self: *Self) !bool {
@@ -196,6 +204,14 @@ pub const Daemon = struct {
             }
 
             try self.handleProcesses();
+
+            // Run status update periodically or check for state changes.
+            // For now, let's just update it every loop to catch any rapid changes
+            // or we could optimize by returning a bool from handleProcesses.
+            // But since handleProcesses runs every 9s, writing a small file is fine.
+            // Actually, handleProcesses might change active profile.
+            // Let's blindly update for correctness as per "whenever anything changes" and 9s is slow enough.
+            try self.updateStatus();
 
             std.Thread.sleep(std.time.ns_per_s * 9);
         }
@@ -329,5 +345,10 @@ pub const Daemon = struct {
                 }
             }
         }
+    }
+    pub fn updateStatus(self: *Self) !void {
+        StatusManager.update(self.allocator, self.config, &self.profile_manager, self.power_profiles) catch |err| {
+            std.log.err("Failed to update status file: {}", .{err});
+        };
     }
 };

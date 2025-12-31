@@ -23,6 +23,8 @@ pub const ScxScheduler = enum {
     p2dq,
     tickless,
     cosmos,
+    cake,
+    beerland,
     none,
 
     pub fn toScxName(self: ScxScheduler) []const u8 {
@@ -54,6 +56,8 @@ pub const ScxScheduler = enum {
         if (std.mem.eql(u8, str, "scx_vder")) return .vder;
         if (std.mem.eql(u8, str, "scx_p2dq")) return .p2dq;
         if (std.mem.eql(u8, str, "scx_tickless")) return .tickless;
+        if (std.mem.eql(u8, str, "scx_cake")) return .cake;
+        if (std.mem.eql(u8, str, "scx_beerland")) return .beerland;
         if (std.mem.eql(u8, str, "scx_cosmos")) return .cosmos;
 
         return error.InvalidValue;
