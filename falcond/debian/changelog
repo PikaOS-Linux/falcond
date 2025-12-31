@@ -1,3 +1,7 @@
+falcond (1.2.0-101pika1) pika; urgency=low
+
+  * feat: Add screensaver inhibition for active profiles and add status output file.
+
 falcond (1.1.9-101pika1) pika; urgency=low
 
   * Swap ArrayList.Managed to ArrayListUnmanaged due to future deprecations in Zig.

@@ -2,7 +2,7 @@
 
 set -e
 
-VERSION="1.1.9"
+VERSION="1.2.0"
 
 source ./pika-build-config.sh
 
