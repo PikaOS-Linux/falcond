@@ -51,7 +51,7 @@ pub const ProfileManager = struct {
     profile_process_info: std.AutoHashMap(*const Profile, ProfileProcessInfo),
     file_count: usize = 0,
     screensaver: ?*Screensaver = null,
-    inhibit_cookie: ?u32 = null,
+    inhibit_cookie: ?Screensaver.Cookie = null,
     inhibit_uid: ?u32 = null,
 
     pub fn init(allocator: std.mem.Allocator, power_profiles: ?*PowerProfiles, config: Config) ProfileManager {
@@ -161,7 +161,7 @@ pub const ProfileManager = struct {
                 if (self.screensaver.?.inhibit("falcond", "Gaming Profile Active", uid)) |cookie| {
                     self.inhibit_cookie = cookie;
                     self.inhibit_uid = uid;
-                    std.log.info("Inhibited screensaver (cookie: {d})", .{cookie});
+                    std.log.info("Inhibited screensaver (cookie: {})", .{cookie});
                 } else |err| {
                     std.log.err("Failed to inhibit screensaver: {}", .{err});
                 }

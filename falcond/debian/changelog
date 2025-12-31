@@ -1,6 +1,14 @@
+falcond (1.2.1-101pika1) pika; urgency=low
+
+  * feat: Add further idle inhibition support
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 08 Jul 2025 22:21:39 +0300
+
 falcond (1.2.0-101pika1) pika; urgency=low
 
   * feat: Add screensaver inhibition for active profiles and add status output file.
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 08 Jul 2025 22:21:39 +0300
 
 falcond (1.1.9-101pika1) pika; urgency=low
 
