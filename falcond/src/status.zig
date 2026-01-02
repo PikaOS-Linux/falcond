@@ -6,6 +6,7 @@ const PowerProfiles = @import("clients/power_profiles.zig").PowerProfiles;
 pub const StatusManager = struct {
     const status_dir = "/var/lib/falcond";
     const status_file = "/var/lib/falcond/status";
+    const tmp_status_file = "/tmp/falcond_status";
 
     pub fn update(
         allocator: std.mem.Allocator,
@@ -13,19 +14,9 @@ pub const StatusManager = struct {
         profile_manager: *const ProfileManager,
         power_profiles: ?*PowerProfiles,
     ) !void {
-        _ = allocator;
-        std.fs.makeDirAbsolute(status_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        const file = try std.fs.createFileAbsolute(status_file, .{ .mode = 0o644 });
-        defer file.close();
-        file.chmod(0o644) catch {};
-
-        var writer_buffer: [4096]u8 = undefined;
-        var file_writer = file.writer(&writer_buffer);
-        const writer = &file_writer.interface;
+        var buffer = std.ArrayList(u8){};
+        defer buffer.deinit(allocator);
+        const writer = buffer.writer(allocator);
 
         try writer.writeAll("FEATURES:\n");
         try writer.print("  Performance Mode: {s}\n", .{if (power_profiles != null and power_profiles.?.isPerformanceAvailable()) "Available" else "Unavailable"});
@@ -125,6 +116,32 @@ pub const StatusManager = struct {
         }
 
         try writer.writeAll("\n");
-        try writer.flush();
+
+        // Write to permanent status file
+        std.fs.makeDirAbsolute(status_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        const file = try std.fs.createFileAbsolute(status_file, .{ .mode = 0o644 });
+        defer file.close();
+        file.chmod(0o644) catch {};
+
+        var write_buffer: [4096]u8 = undefined;
+        var file_buffered_writer = file.writer(&write_buffer);
+        const file_writer = &file_buffered_writer.interface;
+
+        try file_writer.writeAll(buffer.items);
+        try file_writer.flush(); // Don't forget to flush!
+
+        // Write to tmp status file
+        const tmp_file = try std.fs.createFileAbsolute(tmp_status_file, .{ .mode = 0o644 });
+        defer tmp_file.close();
+        tmp_file.chmod(0o644) catch {};
+
+        var tmp_buffered_writer = tmp_file.writer(&write_buffer);
+        const tmp_writer = &tmp_buffered_writer.interface;
+
+        try tmp_writer.writeAll(buffer.items);
+        try tmp_writer.flush(); // Don't forget to flush!
     }
 };

@@ -104,7 +104,7 @@ sudo systemctl status falcond
 
 ## Monitoring
 
-You can check the detailed status of falcond by reading the status file:
+You can check the detailed status of falcond by reading the status file (it is also available in /tmp/falcond-status for apps like mangohud):
 
 ```bash
 cat /var/lib/falcond/status

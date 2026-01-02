@@ -1,3 +1,9 @@
+falcond (1.2.2-101pika1) pika; urgency=low
+
+  * feat: Add extra status file mangohud can access
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 02 Jan 2026 22:21:39 +0300
+
 falcond (1.2.1-101pika1) pika; urgency=low
 
   * feat: Add further idle inhibition support
