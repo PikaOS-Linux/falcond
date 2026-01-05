@@ -143,6 +143,8 @@ pub const Screensaver = struct {
             }
             return err;
         };
+
+        _ = std.posix.waitpid(pid, 0);
     }
 
     fn checkSystemdInhibit(self: *Screensaver) !bool {

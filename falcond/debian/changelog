@@ -1,3 +1,9 @@
+falcond (1.2.3-101pika1) pika; urgency=low
+
+  * fix: zombie inhibit processes
+
+ -- ferreo <ferreo@pika-os.com>  Mon, 05 Jan 2026 14:26:05 +0300
+
 falcond (1.2.2-101pika1) pika; urgency=low
 
   * feat: Add extra status file mangohud can access
