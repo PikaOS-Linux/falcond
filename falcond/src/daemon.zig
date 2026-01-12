@@ -33,7 +33,7 @@ pub const Daemon = struct {
 
         var config = try Config.load(allocator, config_path, system_conf_path);
         errdefer config.deinit();
-
+        std.log.info("Config loaded", .{});
         const power_profiles = try PowerProfiles.init(allocator, config);
         var performance_mode = false;
 
