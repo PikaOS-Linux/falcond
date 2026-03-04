@@ -41,6 +41,7 @@ pub const ProfileProcessInfo = struct {
 
 pub const ProfileManager = struct {
     comptime profiles_dir: []const u8 = "/usr/share/falcond/profiles",
+    comptime user_profiles_dir: []const u8 = "/usr/share/falcond/profiles/user",
     allocator: std.mem.Allocator,
     profiles: std.ArrayListUnmanaged(Profile),
     proton_profile: ?*const Profile,
@@ -74,15 +75,9 @@ pub const ProfileManager = struct {
         };
     }
 
-    pub fn updateFileCount(self: *ProfileManager, maybe_count: ?usize) !void {
-        if (maybe_count) |count| {
-            self.file_count = count;
-            return;
-        }
-
-        const user_profiles_path = "/usr/share/falcond/profiles/user";
+    fn updateFileCountIntern(path: []const u8) !usize {
         var count: usize = 0;
-        var dir = try std.fs.cwd().openDir(self.profiles_dir, .{ .iterate = true });
+        var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
         defer dir.close();
 
         var iter = dir.iterate();
@@ -92,23 +87,35 @@ pub const ProfileManager = struct {
             }
         }
 
-        var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
-            if (err != error.FileNotFound) {
-                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
-            } else {
-                std.log.debug("User profiles directory not found: {s}", .{user_profiles_path});
-            }
+        return count;
+    }
+
+    pub fn updateFileCount(self: *ProfileManager, maybe_count: ?usize) !void {
+        if (maybe_count) |count| {
             self.file_count = count;
             return;
-        };
-        defer user_dir.close();
-
-        var user_iter = user_dir.iterate();
-        while (try user_iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
-                count += 1;
-            }
         }
+        var count: usize = 0;
+
+        count += ProfileManager.updateFileCountIntern(self.profiles_dir) catch |err| blk: {
+            if (err != error.FileNotFound) {
+                std.log.err("Failed to open profiles directory: {s} - {s}", .{ self.profiles_dir, @errorName(err) });
+            } else {
+                std.log.debug("Profiles directory not found: {s}", .{self.profiles_dir});
+            }
+
+            break :blk 0;
+        };
+
+        count += ProfileManager.updateFileCountIntern(self.user_profiles_dir) catch |err| blk: {
+            if (err != error.FileNotFound) {
+                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ self.user_profiles_dir, @errorName(err) });
+            } else {
+                std.log.debug("User profiles directory not found: {s}", .{self.user_profiles_dir});
+            }
+
+            break :blk 0;
+        };
 
         self.file_count = count;
     }

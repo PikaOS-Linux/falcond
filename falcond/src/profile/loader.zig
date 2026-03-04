@@ -28,10 +28,21 @@ pub fn loadProfiles(allocator: std.mem.Allocator, profiles: *std.ArrayListUnmana
             base_path;
         defer if (mode != .none) allocator.free(profiles_path);
 
-        var loaded_profiles = try confloader.loadConfDir(Profile, allocator, profiles_path);
-        defer loaded_profiles.deinit(allocator);
+        var opt_loaded_profiles = confloader.loadConfDir(Profile, allocator, profiles_path) catch |err| blk: {
+            if (err == error.FileNotFound) {
+                std.log.debug("Profiles directory not found: {s}", .{user_profiles_path});
+            } else {
+                std.log.err("Failed to access profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
+            }
 
-        try profiles.appendSlice(allocator, loaded_profiles.items);
+            break :blk null;
+        };
+
+        if (opt_loaded_profiles) |*loaded_profiles| {
+            defer loaded_profiles.deinit(allocator);
+
+            try profiles.appendSlice(allocator, loaded_profiles.items);
+        }
 
         const has_user_profiles = blk: {
             _ = std.fs.accessAbsolute(user_profiles_path, .{}) catch |err| {

@@ -31,7 +31,14 @@ pub const Daemon = struct {
         const system_conf_path_owned = try allocator.dupe(u8, system_conf_path);
         errdefer allocator.free(system_conf_path_owned);
 
-        var config = try Config.load(allocator, config_path, system_conf_path);
+        var config = Config.load(allocator, config_path, system_conf_path) catch |err| blk: {
+            std.log.err("Failed to load config: {}", .{err});
+
+            switch (err) {
+                error.AccessDenied, error.FileNotFound => break :blk Config{},
+                else => return err,
+            }
+        };
         errdefer config.deinit();
 
         const power_profiles = try PowerProfiles.init(allocator, config);
@@ -131,53 +138,37 @@ pub const Daemon = struct {
         return false;
     }
 
-    fn checkProfilesChanges(self: *Self) !bool {
-        const user_profiles_path = "/usr/share/falcond/profiles/user";
-        var dir = try std.fs.cwd().openDir(self.profile_manager.profiles_dir, .{ .iterate = true });
+    fn checkProfilesChangesIntern(path: []const u8, latest_mtime: *i128, current_file_count: *usize) !void {
+        var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
         defer dir.close();
-
-        var latest_mtime: i128 = self.last_profiles_check;
-        var current_file_count: usize = 0;
 
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
-                current_file_count += 1;
+                current_file_count.* += 1;
 
                 const stat = try dir.statFile(entry.name);
                 const mtime = @as(i128, @intCast(stat.mtime));
-                if (mtime > latest_mtime) {
-                    latest_mtime = mtime;
+                if (mtime > latest_mtime.*) {
+                    latest_mtime.* = mtime;
                 }
             }
         }
+    }
 
-        var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
-            if (err != error.FileNotFound) {
-                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
-            }
+    fn checkProfilesChanges(self: *Self) !bool {
+        var latest_mtime: i128 = self.last_profiles_check;
+        var current_file_count: usize = 0;
 
-            if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
-                std.log.info("Profile changes detected in system profiles, reloading profiles", .{});
-                self.last_profiles_check = std.time.nanoTimestamp();
-                try self.profile_manager.updateFileCount(current_file_count);
-                return true;
-            }
-            return false;
+        checkProfilesChangesIntern(self.profile_manager.profiles_dir, &latest_mtime, &current_file_count) catch |err| {
+            if (err != error.FileNotFound)
+                std.log.err("Failed to open profiles directory: {s} - {s}", .{ self.profile_manager.profiles_dir, @errorName(err) });
         };
-        defer user_dir.close();
 
-        var user_iter = user_dir.iterate();
-        while (try user_iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
-                current_file_count += 1;
-                const stat = try user_dir.statFile(entry.name);
-                const mtime = @as(i128, @intCast(stat.mtime));
-                if (mtime > latest_mtime) {
-                    latest_mtime = mtime;
-                }
-            }
-        }
+        checkProfilesChangesIntern(self.profile_manager.user_profiles_dir, &latest_mtime, &current_file_count) catch |err| {
+            if (err != error.FileNotFound)
+                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ self.profile_manager.user_profiles_dir, @errorName(err) });
+        };
 
         if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
             std.log.info("Profile changes detected, reloading profiles", .{});
@@ -196,8 +187,8 @@ pub const Daemon = struct {
         }
 
         while (true) {
-            const config_changed = try self.checkConfigChanges();
-            const profiles_changed = try self.checkProfilesChanges();
+            const config_changed = self.checkConfigChanges() catch false;
+            const profiles_changed = self.checkProfilesChanges() catch false;
 
             if (config_changed or profiles_changed) {
                 try self.reloadConfig();
