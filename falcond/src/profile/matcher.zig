@@ -1,7 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Profile = types.Profile;
-const Config = @import("../config/config.zig").Config;
+const Config = @import("../config/config.zig");
 
 pub fn isProtonParent(arena: std.mem.Allocator, pid: []const u8) !bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;

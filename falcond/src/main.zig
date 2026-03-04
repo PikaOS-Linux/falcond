@@ -1,5 +1,5 @@
 const std = @import("std");
-const Daemon = @import("daemon.zig").Daemon;
+const Daemon = @import("daemon.zig");
 const builtin = @import("builtin");
 pub const std_options = std.Options{
     .log_level = .debug,
