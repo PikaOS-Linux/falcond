@@ -27,38 +27,21 @@ pub const ScxScheduler = enum {
     beerland,
     none,
 
+    const scx_prefix = "scx_";
+
     pub fn toScxName(self: ScxScheduler) []const u8 {
         return switch (self) {
             .none => "",
-            inline else => |tag| "scx_" ++ @tagName(tag),
+            inline else => |tag| scx_prefix ++ @tagName(tag),
         };
     }
 
     pub fn fromString(str: []const u8) ScxError!ScxScheduler {
+        if (std.mem.startsWith(u8, str, scx_prefix))
+            return std.meta.stringToEnum(ScxScheduler, str[scx_prefix.len..]) orelse return error.InvalidValue;
+
         if (std.mem.eql(u8, str, "none")) return .none;
-        if (std.mem.eql(u8, str, "scx_none")) return .none;
         if (std.mem.eql(u8, str, "unknown")) return .none;
-        if (std.mem.eql(u8, str, "scx_bpfland")) return .bpfland;
-        if (std.mem.eql(u8, str, "scx_central")) return .central;
-        if (std.mem.eql(u8, str, "scx_flash")) return .flash;
-        if (std.mem.eql(u8, str, "scx_flatcg")) return .flatcg;
-        if (std.mem.eql(u8, str, "scx_lavd")) return .lavd;
-        if (std.mem.eql(u8, str, "scx_layered")) return .layered;
-        if (std.mem.eql(u8, str, "scx_nest")) return .nest;
-        if (std.mem.eql(u8, str, "scx_pair")) return .pair;
-        if (std.mem.eql(u8, str, "scx_qmap")) return .qmap;
-        if (std.mem.eql(u8, str, "scx_rlfifo")) return .rlfifo;
-        if (std.mem.eql(u8, str, "scx_rustland")) return .rustland;
-        if (std.mem.eql(u8, str, "scx_rusty")) return .rusty;
-        if (std.mem.eql(u8, str, "scx_sdt")) return .sdt;
-        if (std.mem.eql(u8, str, "scx_simple")) return .simple;
-        if (std.mem.eql(u8, str, "scx_userland")) return .userland;
-        if (std.mem.eql(u8, str, "scx_vder")) return .vder;
-        if (std.mem.eql(u8, str, "scx_p2dq")) return .p2dq;
-        if (std.mem.eql(u8, str, "scx_tickless")) return .tickless;
-        if (std.mem.eql(u8, str, "scx_cake")) return .cake;
-        if (std.mem.eql(u8, str, "scx_beerland")) return .beerland;
-        if (std.mem.eql(u8, str, "scx_cosmos")) return .cosmos;
 
         return error.InvalidValue;
     }
