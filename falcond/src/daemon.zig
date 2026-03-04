@@ -35,6 +35,7 @@ pub const Daemon = struct {
         errdefer config.deinit();
 
         const power_profiles = try PowerProfiles.init(allocator, config);
+        errdefer if (power_profiles) |pp| pp.deinit();
         var performance_mode = false;
 
         if (power_profiles) |pp| {
@@ -45,12 +46,14 @@ pub const Daemon = struct {
         }
 
         var profile_manager = ProfileManager.init(allocator, power_profiles, config);
+        errdefer profile_manager.deinit(allocator);
         try ProfileLoader.loadProfiles(allocator, &profile_manager.profiles, &profile_manager.proton_profile, oneshot, config.profile_mode);
 
         const current_time = std.time.nanoTimestamp();
         try scx_scheds.init(allocator);
 
         const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
             .config_path = config_path_owned,
