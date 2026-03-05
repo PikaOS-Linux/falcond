@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: ferreo <ferreo@pika-os.com>
 Rules-Requires-Root: no
 Build-Depends:
- debhelper-compat (= 13), zig, git
+ debhelper-compat (= 13), zig (>= 0.15.1), git, libc-dev
 Standards-Version: 4.6.1
 Homepage: https://pika-os.com
 
@@ -12,6 +12,8 @@ Package: falcond
 Architecture: amd64
 Depends: ${misc:Depends},
          ${shlibs:Depends},
+         dbus,
+         sudo,
          power-profiles-daemon | tuned-ppd,
          scx
 Provides: falcond

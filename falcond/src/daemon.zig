@@ -1,354 +1,777 @@
 const std = @import("std");
-const ProfileManager = @import("profile/manager.zig").ProfileManager;
-const Profile = @import("profile/types.zig").Profile;
-const ProfileLoader = @import("profile/loader.zig");
-const Config = @import("config/config.zig").Config;
-const linux = std.os.linux;
-const posix = std.posix;
-const PowerProfiles = @import("clients/power_profiles.zig").PowerProfiles;
-const scx_scheds = @import("clients/scx_scheds.zig");
-const StatusManager = @import("status.zig").StatusManager;
+const otter_desktop = @import("otter_desktop");
+const otter_utils = @import("otter_utils");
+const PowerProfiles = otter_desktop.PowerProfiles;
+const ScxLoader = otter_desktop.scx_loader.ScxLoader;
+const ScxScheduler = otter_desktop.scx_loader.ScxScheduler;
+const ScxMode = otter_desktop.scx_loader.ScxMode;
+const Inhibitor = @import("inhibitor.zig");
 
-pub const Daemon = struct {
-    allocator: std.mem.Allocator,
-    config_path: []const u8,
-    system_conf_path: []const u8,
-    profile_manager: ProfileManager,
-    oneshot: bool,
-    known_pids: ?std.AutoHashMap(u32, *const Profile),
-    power_profiles: ?*PowerProfiles,
-    performance_mode: bool,
-    last_profiles_check: i128,
-    last_config_check: i128,
-    config: Config,
+const config_mod = @import("config.zig");
+const Config = config_mod.Config;
+const ProfileMode = config_mod.ProfileMode;
+const profiles_mod = @import("profiles.zig");
+const ProfileTable = profiles_mod.ProfileTable;
+const scanner = @import("scanner.zig");
+const matcher_mod = @import("matcher.zig");
+const MatchResult = matcher_mod.MatchResult;
+const status = @import("status.zig");
+const vcache = @import("vcache.zig");
+const EventLoop = @import("event_loop.zig");
 
-    const Self = @This();
+const log = std.log.scoped(.daemon);
 
-    pub fn init(allocator: std.mem.Allocator, config_path: []const u8, system_conf_path: []const u8, oneshot: bool) !*Self {
-        const config_path_owned = try allocator.dupe(u8, config_path);
-        errdefer allocator.free(config_path_owned);
+const Self = @This();
 
-        const system_conf_path_owned = try allocator.dupe(u8, system_conf_path);
-        errdefer allocator.free(system_conf_path_owned);
+allocator: std.mem.Allocator,
+config: config_mod.LoadedConfig,
+table: ProfileTable,
+active_profile_idx: ?u8 = null,
+active_pid: ?u32 = null,
+active_uid: ?u32 = null,
+queued_indices: std.ArrayListUnmanaged(u8) = .{},
+known_pids: std.AutoHashMap(u32, u8),
+profile_pid_counts: [profiles_mod.max_profiles]u16 = .{0} ** profiles_mod.max_profiles,
+power_profiles: ?PowerProfiles = null,
+scx_loader: ?ScxLoader = null,
+inhibitor: Inhibitor,
+restore_sched: ?[]const u8 = null,
+restore_mode: ?[]const u8 = null,
+restore_vcache: ?[]const u8 = null,
+restore_power_profile: ?[:0]const u8 = null,
+profiles_dir: []const u8,
+event_loop: EventLoop,
+pending_rechecks: PendingRechecks = .{},
+deactivation_deadline: ?i128 = null,
+last_full_scan_ns: i128 = 0,
+last_reload_ns: i128 = 0,
+status_dirty: bool = true,
+oneshot: bool,
 
-        var config = try Config.load(allocator, config_path, system_conf_path);
-        errdefer config.deinit();
-        std.log.info("Config loaded", .{});
-        const power_profiles = try PowerProfiles.init(allocator, config);
-        var performance_mode = false;
+const PendingRecheck = struct { pid: u32, deadline_ns: i128, retries: u8 };
+const PendingRechecks = otter_utils.BoundedArray(PendingRecheck, 32);
+const recheck_delay_ns: i128 = 100 * std.time.ns_per_ms;
+const max_rechecks: u8 = 15;
+/// Grace period for deactivation. Allows time for Wine/Proton child processes
+/// to be discovered via fork events or the next /proc scan. Fixed at 3 seconds
+/// — long enough for fork tracking + one fast-poll cycle, short enough that
+/// lingering game profiles don't annoy the user.
+const deactivation_grace_ns: i128 = 3000 * std.time.ns_per_ms;
+/// Minimum interval between inotify-triggered reloads. Prevents feedback loops
+/// caused by watch re-registration (IN_IGNORED events) and external tools
+/// probing watched directories (e.g. falcond-gui's write permission test).
+const reload_debounce_ns: i128 = 1000 * std.time.ns_per_ms;
 
-        if (power_profiles) |pp| {
-            performance_mode = pp.isPerformanceAvailable();
-            if (performance_mode) {
-                std.log.info("Performance profile available - power profile management enabled", .{});
-            }
+pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool) !Self {
+    scanner.initProcFd();
+
+    var loaded = try config_mod.load(allocator, config_path);
+    errdefer loaded.deinit();
+
+    log.info("config loaded", .{});
+
+    var table = ProfileTable.init();
+    errdefer table.deinit(allocator);
+
+    const profiles_dir = try config_mod.profilesDirForMode(
+        allocator,
+        config_mod.default_profiles_dir,
+        loaded.config.profile_mode,
+    );
+    errdefer allocator.free(profiles_dir);
+
+    profiles_mod.loadProfiles(allocator, &table, profiles_dir) catch |err| {
+        log.err("failed to load profiles: {}", .{err});
+    };
+
+    profiles_mod.loadUserProfiles(allocator, &table) catch |err| {
+        log.warn("failed to load user profiles: {}", .{err});
+    };
+
+    log.info("loaded {d} profiles (mode: {s})", .{ table.count, @tagName(loaded.config.profile_mode) });
+
+    const power_profiles: ?PowerProfiles = if (loaded.config.enable_performance_mode)
+        PowerProfiles.init(allocator) catch |err| blk: {
+            log.warn("power profiles unavailable: {}", .{err});
+            break :blk null;
         }
+    else
+        null;
 
-        var profile_manager = ProfileManager.init(allocator, power_profiles, config);
-        try ProfileLoader.loadProfiles(allocator, &profile_manager.profiles, &profile_manager.proton_profile, oneshot, config.profile_mode);
+    const scx_loader: ?ScxLoader = ScxLoader.init(allocator) catch |err| blk: {
+        log.warn("scx_loader unavailable: {}", .{err});
+        break :blk null;
+    };
 
-        const current_time = std.time.nanoTimestamp();
-        try scx_scheds.init(allocator);
+    var event_loop = if (!oneshot)
+        try EventLoop.init(allocator, config_path, profiles_dir)
+    else
+        undefined;
+    errdefer if (!oneshot) event_loop.deinit();
 
-        const self = try allocator.create(Self);
-        self.* = .{
-            .allocator = allocator,
-            .config_path = config_path_owned,
-            .system_conf_path = system_conf_path_owned,
-            .profile_manager = profile_manager,
-            .oneshot = oneshot,
-            .known_pids = if (!oneshot) std.AutoHashMap(u32, *const Profile).init(allocator) else null,
-            .power_profiles = power_profiles,
-            .last_profiles_check = current_time,
-            .last_config_check = current_time,
-            .performance_mode = performance_mode,
-            .config = config,
+    var self = Self{
+        .allocator = allocator,
+        .config = loaded,
+        .table = table,
+        .known_pids = std.AutoHashMap(u32, u8).init(allocator),
+        .power_profiles = power_profiles,
+        .scx_loader = scx_loader,
+        .inhibitor = Inhibitor.init(allocator),
+        .profiles_dir = profiles_dir,
+        .event_loop = event_loop,
+        .oneshot = oneshot,
+    };
+
+    if (loaded.config.vcache_mode.toSysfsValue()) |val| {
+        vcache.write(val) catch |err| {
+            log.warn("failed to set global vcache mode: {}", .{err});
         };
-
-        try self.profile_manager.updateFileCount(null);
-
-        // Initial status update
-        StatusManager.update(allocator, config, &profile_manager, power_profiles) catch |err| {
-            std.log.err("Failed to update status file: {}", .{err});
-        };
-
-        return self;
     }
 
-    pub fn deinit(self: *Self) void {
-        scx_scheds.deinit();
-        self.profile_manager.deinit(self.allocator);
-        if (self.power_profiles) |pp| {
-            pp.*.deinit();
+    if (loaded.config.scx_sched != .none) {
+        if (self.scx_loader) |*scx| {
+            scx.switchScheduler(loaded.config.scx_sched, loaded.config.scx_sched_props) catch |err| {
+                log.warn("failed to set global scx scheduler: {}", .{err});
+            };
         }
-        if (self.known_pids) |*map| {
-            map.deinit();
-        }
-        self.config.deinit();
-        self.allocator.free(self.config_path);
-        self.allocator.free(self.system_conf_path);
-        self.allocator.destroy(self);
     }
 
-    fn reloadConfig(self: *Self) !void {
-        if (self.known_pids) |*map| {
-            map.clearRetainingCapacity();
-        }
+    self.updateStatus();
+    return self;
+}
 
-        if (self.profile_manager.active_profile != null) {
-            try self.profile_manager.unloadProfile(self.profile_manager.active_profile.?);
-        }
-
-        self.profile_manager.deinit(self.allocator);
-        if (self.power_profiles) |pp| {
-            pp.*.deinit();
-        }
-        self.config.deinit();
-
-        const config = try Config.load(self.allocator, self.config_path, self.system_conf_path);
-        const power_profiles = try PowerProfiles.init(self.allocator, config);
-        var profile_manager = ProfileManager.init(self.allocator, power_profiles, config);
-        try ProfileLoader.loadProfiles(self.allocator, &profile_manager.profiles, &profile_manager.proton_profile, self.oneshot, config.profile_mode);
-
-        self.config = config;
-        self.power_profiles = power_profiles;
-        self.performance_mode = if (power_profiles) |pp| pp.isPerformanceAvailable() else false;
-        self.profile_manager = profile_manager;
-
-        try self.profile_manager.updateFileCount(null);
-
-        try self.updateStatus();
+pub fn deinit(self: *Self) void {
+    if (self.active_profile_idx) |idx| {
+        self.deactivateProfile(idx);
     }
 
-    fn checkConfigChanges(self: *Self) !bool {
-        const stat = try std.fs.cwd().statFile(self.config_path);
-        const mtime = @as(i128, @intCast(stat.mtime));
-        if (mtime > self.last_config_check) {
-            std.log.info("Config file changed, reloading profiles", .{});
-            self.last_config_check = std.time.nanoTimestamp();
-            return true;
-        }
-        return false;
+    // Write final status before tearing down D-Bus connections
+    self.updateStatus();
+
+    if (!self.oneshot) self.event_loop.deinit();
+    self.inhibitor.deinit();
+    if (self.scx_loader) |*scx| {
+        scx.deinit();
+    }
+    if (self.power_profiles) |*pp| {
+        pp.deinit();
+    }
+    self.allocator.free(self.profiles_dir);
+    self.queued_indices.deinit(self.allocator);
+    self.known_pids.deinit();
+    self.table.deinit(self.allocator);
+    self.config.deinit();
+    scanner.deinitProcFd();
+}
+
+pub fn run(self: *Self) !void {
+    if (self.oneshot) {
+        self.handleProcesses();
+        return;
     }
 
-    fn checkProfilesChanges(self: *Self) !bool {
-        const user_profiles_path = "/usr/share/falcond/profiles/user";
-        var dir = try std.fs.cwd().openDir(self.profile_manager.profiles_dir, .{ .iterate = true });
-        defer dir.close();
+    // Wire up fork tracking now that self has a stable address
+    self.event_loop.tracked_pids = &self.known_pids;
+    self.event_loop.profile_pid_counts = &self.profile_pid_counts;
 
-        var latest_mtime: i128 = self.last_profiles_check;
-        var current_file_count: usize = 0;
+    // Initial /proc scan to catch processes already running before daemon started
+    self.handleProcesses();
+    self.status_dirty = true;
 
-        var iter = dir.iterate();
-        while (try iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
-                current_file_count += 1;
+    while (true) {
+        const timeout = self.computeTimeout();
+        const events = self.event_loop.wait(timeout);
 
-                const stat = try dir.statFile(entry.name);
-                const mtime = @as(i128, @intCast(stat.mtime));
-                if (mtime > latest_mtime) {
-                    latest_mtime = mtime;
-                }
+        for (events.constSlice()) |event| {
+            switch (event) {
+                .signal_term => {
+                    log.info("received SIGTERM, shutting down", .{});
+                    return;
+                },
+                .signal_hup => {
+                    log.info("received SIGHUP, reloading", .{});
+                    self.reload() catch |err| {
+                        log.err("reload failed: {}", .{err});
+                    };
+                    self.updateStatus();
+                    self.handleProcesses();
+                    self.last_reload_ns = std.time.nanoTimestamp();
+                    self.status_dirty = true;
+                },
+                .config_changed => {
+                    const now = std.time.nanoTimestamp();
+                    if (now - self.last_reload_ns >= reload_debounce_ns) {
+                        log.info("config or profiles changed, reloading", .{});
+                        self.reload() catch |err| {
+                            log.err("reload failed: {}", .{err});
+                        };
+                        self.updateStatus(); // flush deactivated state for external watchers
+                        self.handleProcesses();
+                        self.last_reload_ns = now;
+                        self.status_dirty = true;
+                    } else {
+                        log.debug("config change debounced", .{});
+                    }
+                },
+                .proc_fork => |info| {
+                    self.handleForkEvent(info.parent, info.child);
+                    self.status_dirty = true;
+                },
+                .proc_exec => |pid| self.handleExecEvent(pid),
+                .proc_exit => |pid| self.handleExitEvent(pid),
+                .timeout => {
+                    // Only run full /proc scan at the configured interval, not during fast-poll
+                    const now = std.time.nanoTimestamp();
+                    const interval_ns: i128 = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
+                    if (now - self.last_full_scan_ns >= interval_ns) {
+                        self.handleProcesses();
+                        self.status_dirty = true;
+                        self.last_full_scan_ns = now;
+                    }
+                },
             }
         }
 
-        var user_dir = std.fs.cwd().openDir(user_profiles_path, .{ .iterate = true }) catch |err| {
-            if (err != error.FileNotFound) {
-                std.log.err("Failed to open user profiles directory: {s} - {s}", .{ user_profiles_path, @errorName(err) });
-            }
-
-            if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
-                std.log.info("Profile changes detected in system profiles, reloading profiles", .{});
-                self.last_profiles_check = std.time.nanoTimestamp();
-                try self.profile_manager.updateFileCount(current_file_count);
-                return true;
-            }
-            return false;
-        };
-        defer user_dir.close();
-
-        var user_iter = user_dir.iterate();
-        while (try user_iter.next()) |entry| {
-            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".conf")) {
-                current_file_count += 1;
-                const stat = try user_dir.statFile(entry.name);
-                const mtime = @as(i128, @intCast(stat.mtime));
-                if (mtime > latest_mtime) {
-                    latest_mtime = mtime;
-                }
-            }
+        if (self.pending_rechecks.len > 0) {
+            self.processPendingRechecks();
         }
 
-        if (latest_mtime > self.last_profiles_check or current_file_count != self.profile_manager.file_count) {
-            std.log.info("Profile changes detected, reloading profiles", .{});
-            self.last_profiles_check = std.time.nanoTimestamp();
-            try self.profile_manager.updateFileCount(current_file_count);
-            return true;
-        }
+        self.checkDeactivationGrace();
 
-        return false;
-    }
-
-    pub fn run(self: *Self) !void {
-        if (self.oneshot) {
-            try self.handleProcesses();
-            return;
-        }
-
-        while (true) {
-            const config_changed = try self.checkConfigChanges();
-            const profiles_changed = try self.checkProfilesChanges();
-
-            if (config_changed or profiles_changed) {
-                try self.reloadConfig();
-            }
-
-            try self.handleProcesses();
-
-            // Run status update periodically or check for state changes.
-            // For now, let's just update it every loop to catch any rapid changes
-            // or we could optimize by returning a bool from handleProcesses.
-            // But since handleProcesses runs every 9s, writing a small file is fine.
-            // Actually, handleProcesses might change active profile.
-            // Let's blindly update for correctness as per "whenever anything changes" and 9s is slow enough.
-            try self.updateStatus();
-
-            std.Thread.sleep(std.time.ns_per_s * 9);
+        if (self.status_dirty) {
+            self.updateStatus();
+            self.status_dirty = false;
         }
     }
+}
 
-    fn scanProcesses(allocator: std.mem.Allocator) !std.AutoHashMap(u32, []const u8) {
-        var pids = std.AutoHashMap(u32, []const u8).init(allocator);
+fn handleForkEvent(self: *Self, parent: u32, child: u32) void {
+    // Child already tracked by event_loop — cancel any pending deactivation
+    self.deactivation_deadline = null;
+    // Keep active_pid/active_uid pointing at a live process so stop scripts
+    // run as the correct user after the original parent exits.
+    if (self.active_pid != null and self.active_pid.? == parent) {
+        self.active_pid = child;
+        self.active_uid = scanner.findUserForProcess(child);
+    }
+}
 
-        const proc_fd = try std.posix.open("/proc", .{
-            .ACCMODE = .RDONLY,
-            .DIRECTORY = true,
-        }, 0);
-        defer std.posix.close(proc_fd);
+fn handleExecEvent(self: *Self, pid: u32) void {
+    if (pid <= 2) return;
+    if (self.known_pids.contains(pid)) return;
 
-        var buffer: [8192]u8 = undefined;
-        while (true) {
-            const nread = linux.syscall3(.getdents64, @as(usize, @intCast(proc_fd)), @intFromPtr(&buffer), buffer.len);
+    // Fast path: read /proc/pid/comm (kernel-cached, ~0 cost) and skip
+    // processes that can't possibly match any profile. Avoids the expensive
+    // cmdline read + arena alloc for the vast majority of system processes.
+    const comm_buf = scanner.getProcessComm(pid) orelse return;
+    const comm = std.mem.sliceTo(&comm_buf, 0);
+    if (!self.couldMatch(comm)) return;
 
-            if (nread == 0) break;
-            if (nread < 0) return error.ReadDirError;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
 
-            var pos: usize = 0;
-            while (pos < nread) {
-                const dirent = @as(*align(1) linux.dirent64, @ptrCast(&buffer[pos]));
-                if (dirent.type == linux.DT.DIR) {
-                    const name = std.mem.sliceTo(@as([*:0]u8, @ptrCast(&dirent.name)), 0);
-                    if (std.fmt.parseInt(u32, name, 10)) |pid| {
-                        if (getProcessNameFromPid(allocator, pid)) |proc_name| {
-                            try pids.put(pid, proc_name);
-                        } else |_| {}
-                    } else |_| {}
-                }
-                pos += dirent.reclen;
-            }
+    const name = scanner.getProcessName(alloc, pid) orelse return;
+
+    // Wine/Proton preloaders update cmdline after exec — queue for deferred recheck
+    if (isWinePreloader(name)) {
+        self.queueRecheck(pid, max_rechecks);
+        return;
+    }
+
+    self.matchAndActivate(pid, name);
+}
+
+fn isWinePreloader(name: []const u8) bool {
+    return std.mem.eql(u8, name, "wine64-preloader") or std.mem.eql(u8, name, "wine-preloader");
+}
+
+fn queueRecheck(self: *Self, pid: u32, retries: u8) void {
+    const deadline = std.time.nanoTimestamp() + recheck_delay_ns;
+    self.pending_rechecks.append(.{ .pid = pid, .deadline_ns = deadline, .retries = retries }) catch {};
+}
+
+fn processPendingRechecks(self: *Self) void {
+    const now = std.time.nanoTimestamp();
+    var write: usize = 0;
+    for (self.pending_rechecks.constSlice()) |entry| {
+        if (now < entry.deadline_ns) {
+            self.pending_rechecks.buffer[write] = entry;
+            write += 1;
+            continue;
         }
 
-        return pids;
-    }
+        // Entry expired — consume it (don't write back)
 
-    fn getProcessNameFromPid(allocator: std.mem.Allocator, pid: u32) ![]const u8 {
-        var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{pid});
+        if (self.known_pids.contains(entry.pid)) continue;
 
-        const file = try std.fs.openFileAbsolute(path, .{});
-        defer file.close();
-
-        var buffer: [4096]u8 = undefined;
-        const bytes = try file.readAll(&buffer);
-        if (bytes == 0) return error.EmptyFile;
-
-        const end = std.mem.indexOfScalar(u8, buffer[0..bytes], 0) orelse bytes;
-        const cmdline = buffer[0..end];
-
-        const last_unix = std.mem.lastIndexOfScalar(u8, cmdline, '/') orelse 0;
-        const last_windows = std.mem.lastIndexOfScalar(u8, cmdline, '\\') orelse 0;
-        const last_sep = @max(last_unix, last_windows);
-
-        const exe_name = if (last_sep > 0)
-            cmdline[last_sep + 1 ..]
-        else
-            cmdline;
-
-        return try allocator.dupe(u8, exe_name);
-    }
-
-    fn handleProcesses(self: *Self) !void {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
-        const arena_allocator = arena.allocator();
+        const alloc = arena.allocator();
 
-        var processes = try scanProcesses(arena_allocator);
-        defer {
-            var it = processes.iterator();
-            while (it.next()) |entry| {
-                arena_allocator.free(entry.value_ptr.*);
-            }
-            processes.deinit();
-        }
+        const name = scanner.getProcessName(alloc, entry.pid) orelse continue;
 
-        var it = processes.iterator();
-        while (it.next()) |entry| {
-            const pid = entry.key_ptr.*;
-            const process_name = entry.value_ptr.*;
-
-            if (!self.oneshot) {
-                if (self.known_pids) |*known| {
-                    if (!known.contains(pid)) {
-                        if (try self.profile_manager.matchProcess(arena_allocator, try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name)) |profile| {
-                            try known.put(pid, profile);
-                            try self.profile_manager.activateProfile(profile);
-                        }
-                    }
-                }
+        // Still a preloader — re-queue if retries remain
+        if (isWinePreloader(name)) {
+            if (entry.retries > 0) {
+                self.queueRecheck(entry.pid, entry.retries - 1);
             } else {
-                if (try self.profile_manager.matchProcess(arena_allocator, try std.fmt.allocPrint(arena_allocator, "{d}", .{pid}), process_name)) |profile| {
-                    try self.profile_manager.activateProfile(profile);
-                }
+                log.debug("recheck exhausted pid={d}, still '{s}'", .{ entry.pid, name });
+            }
+            continue;
+        }
+
+        // Drop system .exe processes immediately
+        if (self.isSystemProcess(name)) continue;
+
+        log.debug("deferred recheck pid={d} name='{s}'", .{ entry.pid, name });
+        self.matchAndActivate(entry.pid, name);
+    }
+    self.pending_rechecks.len = @intCast(write);
+}
+
+fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
+    if (self.isSystemProcess(name)) return;
+
+    const result = matcher_mod.matchProcess(
+        &self.table,
+        self.config.config,
+        pid,
+        name,
+    );
+
+    if (result.matched()) {
+        log.info("matched pid={d} name='{s}' profile='{s}'", .{
+            pid, name, self.table.names[result.profile_idx].get(),
+        });
+        self.known_pids.put(pid, result.profile_idx) catch {};
+        self.profile_pid_counts[result.profile_idx] += 1;
+        self.status_dirty = true;
+        self.activateProfile(result.profile_idx, pid);
+    }
+}
+
+fn handleExitEvent(self: *Self, pid: u32) void {
+    const profile_idx = self.known_pids.get(pid) orelse return;
+    log.debug("exit pid={d} profile='{s}'", .{ pid, self.table.names[profile_idx].get() });
+    _ = self.known_pids.remove(pid);
+    self.profile_pid_counts[profile_idx] -= 1;
+    self.status_dirty = true;
+
+    if (self.active_profile_idx) |active_idx| {
+        if (active_idx == profile_idx) {
+            if (!self.hasAnyPidForProfile(profile_idx)) {
+                // Start grace period — Wine/Proton processes re-exec frequently
+                self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+                log.info("last pid for '{s}' exited, grace period started", .{self.table.names[profile_idx].get()});
+            }
+        }
+    }
+}
+
+fn reload(self: *Self) !void {
+    // Allocate new state before destroying old — avoids dangling on failure
+    var new_config = try config_mod.load(self.allocator, config_mod.default_config_path);
+    errdefer new_config.deinit();
+
+    const new_dir = try config_mod.profilesDirForMode(
+        self.allocator,
+        config_mod.default_profiles_dir,
+        new_config.config.profile_mode,
+    );
+    errdefer self.allocator.free(new_dir);
+
+    // New state ready — safe to tear down old state
+    if (self.active_profile_idx) |idx| {
+        self.deactivateProfile(idx);
+    }
+    self.active_profile_idx = null;
+    self.deactivation_deadline = null;
+    self.pending_rechecks = .{};
+    self.queued_indices.clearRetainingCapacity();
+    self.known_pids.clearRetainingCapacity();
+    self.profile_pid_counts = .{0} ** profiles_mod.max_profiles;
+
+    self.config.deinit();
+    self.config = new_config;
+
+    self.table.deinit(self.allocator);
+    self.table = ProfileTable.init();
+
+    self.allocator.free(self.profiles_dir);
+    self.profiles_dir = new_dir;
+
+    profiles_mod.loadProfiles(self.allocator, &self.table, self.profiles_dir) catch {};
+    profiles_mod.loadUserProfiles(self.allocator, &self.table) catch {};
+
+    if (!self.oneshot) {
+        self.event_loop.updateWatches(config_mod.default_config_path, self.profiles_dir);
+    }
+
+    log.info("reloaded {d} profiles", .{self.table.count});
+}
+
+fn handleProcesses(self: *Self) void {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var processes = scanner.scanProcesses(alloc) catch |err| {
+        log.err("proc scan failed: {}", .{err});
+        return;
+    };
+    defer processes.deinit();
+
+    var alive = std.AutoHashMap(u32, void).init(alloc);
+
+    var it = processes.iterator();
+    while (it.next()) |entry| {
+        const pid = entry.key_ptr.*;
+        const name = entry.value_ptr.*;
+
+        if (self.known_pids.contains(pid)) {
+            alive.put(pid, {}) catch {};
+            continue;
+        }
+
+        // Fast pre-filter: read /proc/pid/comm and skip processes that
+        // can't possibly match any profile before the expensive match.
+        const comm_buf = scanner.getProcessComm(pid) orelse continue;
+        const comm = std.mem.sliceTo(&comm_buf, 0);
+        if (!self.couldMatch(comm)) continue;
+
+        if (self.isSystemProcess(name)) continue;
+
+        const result = matcher_mod.matchProcess(
+            &self.table,
+            self.config.config,
+            pid,
+            name,
+        );
+
+        if (result.matched()) {
+            self.known_pids.put(pid, result.profile_idx) catch {};
+            self.profile_pid_counts[result.profile_idx] += 1;
+            alive.put(pid, {}) catch {};
+            self.activateProfile(result.profile_idx, pid);
+        }
+    }
+
+    if (!self.oneshot) {
+        var to_remove: std.ArrayListUnmanaged(u32) = .{};
+        var kit = self.known_pids.iterator();
+        while (kit.next()) |entry| {
+            if (!alive.contains(entry.key_ptr.*)) {
+                to_remove.append(alloc, entry.key_ptr.*) catch {};
             }
         }
 
-        if (!self.oneshot) {
-            if (self.known_pids) |*known| {
-                var known_it = known.iterator();
-                while (known_it.next()) |entry| {
-                    const pid = entry.key_ptr.*;
-                    if (!processes.contains(pid)) {
-                        const profile = entry.value_ptr.*;
-                        var found_profile = false;
+        for (to_remove.items) |pid| {
+            const profile_idx = self.known_pids.get(pid) orelse continue;
+            _ = self.known_pids.remove(pid);
+            self.profile_pid_counts[profile_idx] -= 1;
 
-                        if (self.profile_manager.active_profile) |active| {
-                            if (active == profile) {
-                                std.log.info("Process {s} instance has terminated", .{profile.name});
-                                const pid_str = try std.fmt.allocPrint(arena_allocator, "{d}", .{pid});
-                                try self.profile_manager.deactivateProfile(active, pid_str);
-                                found_profile = true;
-                            }
-                        }
-
-                        if (!found_profile) {
-                            for (self.profile_manager.queued_profiles.items, 0..) |queued, i| {
-                                if (queued == profile) {
-                                    std.log.info("Process {s} has terminated", .{profile.name});
-                                    _ = self.profile_manager.queued_profiles.orderedRemove(i);
-                                    break;
-                                }
-                            }
-                        }
-
-                        _ = known.remove(pid);
+            if (self.active_profile_idx) |active_idx| {
+                if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
+                    // Use same grace period as handleExitEvent — Wine/Proton
+                    // children may not have been discovered yet.
+                    if (self.deactivation_deadline == null) {
+                        self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+                        log.info("last pid for '{s}' gone from /proc, grace period started", .{self.table.names[profile_idx].get()});
                     }
                 }
             }
         }
     }
-    pub fn updateStatus(self: *Self) !void {
-        StatusManager.update(self.allocator, self.config, &self.profile_manager, self.power_profiles) catch |err| {
-            std.log.err("Failed to update status file: {}", .{err});
+}
+
+fn activateProfile(self: *Self, idx: u8, pid: u32) void {
+    if (self.active_profile_idx) |active| {
+        if (active == idx) {
+            // Same profile — cancel any pending deactivation
+            if (self.deactivation_deadline != null) {
+                self.deactivation_deadline = null;
+                log.info("deactivation cancelled — new pid={d} for '{s}'", .{ pid, self.table.names[idx].get() });
+            }
+            return;
+        }
+        // Different profile while current is in grace period — deactivate current, activate new
+        if (self.deactivation_deadline != null) {
+            self.deactivation_deadline = null;
+            self.deactivateProfile(active);
+            // Fall through to activate the new profile below
+        } else {
+            // Current profile still has PIDs — queue the new one if not already queued
+            for (self.queued_indices.items) |qi| {
+                if (qi == idx) return;
+            }
+            self.queued_indices.append(self.allocator, idx) catch {
+                log.warn("queue full, dropping profile '{s}'", .{self.table.names[idx].get()});
+            };
+            log.info("queued profile '{s}'", .{self.table.names[idx].get()});
+            return;
+        }
+    }
+
+    self.active_profile_idx = idx;
+    self.active_pid = pid;
+
+    // Process may exit before deactivation, so cache the UID now
+    if (pid != 0) {
+        self.active_uid = scanner.findUserForProcess(pid);
+    }
+
+    const act = &self.table.activation[idx];
+    const name = self.table.names[idx].get();
+    log.info("activating profile '{s}' (scx={s}, mode={s}, perf={}, vcache={s}, inhibit={})", .{
+        name,
+        @tagName(act.scx_sched),
+        @tagName(act.scx_sched_props),
+        act.performance_mode,
+        @tagName(act.vcache_mode),
+        act.idle_inhibit,
+    });
+
+    // Snapshot current state so we can restore on deactivation
+    if (self.power_profiles) |*pp| {
+        if (pp.getActiveProfile()) |p| {
+            self.restore_power_profile = if (std.mem.eql(u8, p, "performance"))
+                "performance"
+            else if (std.mem.eql(u8, p, "power-saver"))
+                "power-saver"
+            else
+                "balanced";
+        }
+    }
+    if (self.scx_loader) |*scx| {
+        if (scx.getCurrentScheduler()) |sched| {
+            self.restore_sched = sched.toScxName();
+        }
+        self.restore_mode = @tagName(scx.getSchedulerMode());
+    }
+    self.restore_vcache = vcache.read();
+
+    if (act.performance_mode) {
+        if (self.power_profiles) |*pp| {
+            pp.setActiveProfile("performance") catch |err| {
+                log.warn("failed to set performance profile: {}", .{err});
+            };
+        }
+    }
+
+    if (act.scx_sched != .none) {
+        if (self.scx_loader) |*scx| {
+            scx.switchScheduler(act.scx_sched, act.scx_sched_props) catch |err| {
+                log.warn("failed to switch scx scheduler: {}", .{err});
+            };
+        }
+    }
+
+    if (act.vcache_mode.toSysfsValue()) |val| {
+        vcache.write(val) catch |err| {
+            log.warn("failed to set vcache mode: {}", .{err});
         };
     }
-};
+
+    if (act.idle_inhibit) {
+        self.inhibitor.inhibit("falcond", "Game profile active", pid);
+    }
+
+    if (!act.start_script.isEmpty()) {
+        self.runScript(act.start_script.get());
+    }
+
+    self.status_dirty = true;
+}
+
+fn deactivateProfile(self: *Self, idx: u8) void {
+    const act = &self.table.activation[idx];
+    const name = self.table.names[idx].get();
+    log.info("deactivating profile '{s}'", .{name});
+
+    if (self.restore_power_profile) |profile| {
+        if (self.power_profiles) |*pp| {
+            pp.setActiveProfile(profile) catch |err| {
+                log.warn("failed to restore power profile: {}", .{err});
+            };
+        }
+        self.restore_power_profile = null;
+    }
+
+    if (self.restore_sched) |sched_name| {
+        if (self.scx_loader) |*scx| {
+            const restore_mode = if (self.restore_mode) |m|
+                std.meta.stringToEnum(ScxMode, m) orelse .default
+            else
+                .default;
+            const restore_sched = ScxScheduler.fromString(sched_name) catch .none;
+            if (restore_sched != .none) {
+                scx.switchScheduler(restore_sched, restore_mode) catch |err| {
+                    log.warn("failed to restore scx scheduler: {}", .{err});
+                };
+            } else {
+                scx.stopScheduler() catch |err| {
+                    log.warn("failed to stop scx scheduler: {}", .{err});
+                };
+            }
+        }
+        self.restore_sched = null;
+        self.restore_mode = null;
+    }
+
+    if (self.restore_vcache) |val| {
+        vcache.write(val) catch |err| {
+            log.warn("failed to restore vcache mode: {}", .{err});
+        };
+        self.restore_vcache = null;
+    }
+
+    if (self.inhibitor.isInhibited()) {
+        self.inhibitor.uninhibit();
+    }
+
+    if (!act.stop_script.isEmpty()) {
+        self.runScript(act.stop_script.get());
+    }
+
+    self.active_profile_idx = null;
+    self.active_pid = null;
+    self.active_uid = null;
+    self.status_dirty = true;
+}
+
+/// Run a profile script, dropping to the process owner's session when running as root.
+fn runScript(self: *Self, script: []const u8) void {
+    const linux = std.os.linux;
+    if (linux.geteuid() == 0) {
+        const uid = self.active_uid orelse {
+            log.warn("no saved uid, running script as root", .{});
+            otter_utils.process.spawnCommand(self.allocator, script);
+            return;
+        };
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+
+        const uid_str = std.fmt.allocPrint(alloc, "#{d}", .{uid}) catch return;
+        const dbus_env = std.fmt.allocPrint(alloc, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{d}/bus", .{uid}) catch return;
+
+        // Use explicit argv so script content can't escape the sh -c argument
+        const argv = [_][]const u8{
+            "sudo", "-u", uid_str,
+            "env", dbus_env, "DISPLAY=:0",
+            "/bin/sh", "-c", script,
+        };
+
+        otter_utils.process.spawnArgv(self.allocator, &argv);
+    } else {
+        otter_utils.process.spawnCommand(self.allocator, script);
+    }
+}
+
+fn isSystemProcess(self: *Self, name: []const u8) bool {
+    if (!scanner.isExe(name)) return false;
+    for (self.config.config.system_processes) |sys_proc| {
+        if (std.ascii.eqlIgnoreCase(name, sys_proc)) return true;
+    }
+    return false;
+}
+
+fn hasAnyPidForProfile(self: *Self, profile_idx: u8) bool {
+    return self.profile_pid_counts[profile_idx] > 0;
+}
+
+/// Quick check whether a /proc/pid/comm value could ever match a profile.
+/// Returns true for: wine/proton preloaders, .exe names, and names present
+/// in the profile table. Returns false for everything else (bash, foot, ls …),
+/// letting handleExecEvent skip the expensive cmdline read.
+///
+/// NOTE: /proc/pid/comm is truncated to 15 chars by the kernel, so we use
+/// prefix checks for wine and substring checks for .exe.
+fn couldMatch(self: *Self, comm: []const u8) bool {
+    if (comm.len == 0) return false;
+    // Wine/Proton preloaders — prefix match because comm truncates
+    // "wine64-preloader" (16 chars) to "wine64-preloade"
+    if (std.mem.startsWith(u8, comm, "wine")) return true;
+    // .exe anywhere in comm — handles truncation where suffix may shift
+    // e.g. "MyLongGame.exe" truncated still contains ".exe"
+    if (std.ascii.indexOfIgnoreCase(comm, ".exe") != null) return true;
+    // Comm is 15 chars max — if it's exactly 15, the real name may be
+    // longer and could end in .exe that got truncated away
+    if (comm.len >= 15) return true;
+    // Direct profile name match (hash map then case-insensitive)
+    if (self.table.name_map.get(comm) != null) return true;
+    if (self.table.findByName(comm) != null) return true;
+    return false;
+}
+
+fn computeTimeout(self: *Self) u32 {
+    // Poll faster when grace period or deferred rechecks are pending
+    if (self.deactivation_deadline != null or self.pending_rechecks.len > 0)
+        return 200;
+    return self.config.config.poll_interval_ms;
+}
+
+fn checkDeactivationGrace(self: *Self) void {
+    const deadline = self.deactivation_deadline orelse return;
+    if (std.time.nanoTimestamp() < deadline) return;
+
+    const idx = self.active_profile_idx orelse {
+        self.deactivation_deadline = null;
+        return;
+    };
+
+    // Check if new PIDs appeared during grace period
+    if (self.hasAnyPidForProfile(idx)) {
+        self.deactivation_deadline = null;
+        log.info("profile '{s}' kept alive by remaining processes", .{self.table.names[idx].get()});
+        return;
+    }
+
+    // Pending rechecks may resolve to the game (wine preloader → game exe) — extend grace
+    if (self.pending_rechecks.len > 0) {
+        self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+        log.debug("extending grace — {d} pending rechecks", .{self.pending_rechecks.len});
+        return;
+    }
+
+    self.deactivation_deadline = null;
+    log.info("grace period expired, deactivating profile '{s}'", .{self.table.names[idx].get()});
+    self.deactivateProfile(idx);
+
+    // Promote next queued profile
+    if (self.queued_indices.items.len > 0) {
+        const next = self.queued_indices.orderedRemove(0);
+        if (self.findPidForProfile(next)) |next_pid| {
+            self.activateProfile(next, next_pid);
+        } else {
+            log.info("queued profile '{s}' dropped — process no longer running", .{self.table.names[next].get()});
+        }
+    }
+}
+
+fn findPidForProfile(self: *Self, profile_idx: u8) ?u32 {
+    var it = self.known_pids.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == profile_idx) {
+            return entry.key_ptr.*;
+        }
+    }
+    return null;
+}
+
+fn updateStatus(self: *Self) void {
+    status.update(
+        self.config.config,
+        &self.table,
+        self.active_profile_idx,
+        self.queued_indices.items,
+        if (self.power_profiles) |*pp| pp else null,
+        if (self.scx_loader) |*scx| scx else null,
+        self.restore_sched,
+        self.restore_mode,
+        self.restore_power_profile,
+        &self.inhibitor,
+    );
+}

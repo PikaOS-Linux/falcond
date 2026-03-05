@@ -40,6 +40,7 @@ There is also a list of proton/wine system processes in `/usr/share/falcond/syst
 - `scx_sched_props`: SCX scheduler mode (options: default, gaming, power, latency, server)
 - `vcache_mode`: VCache management mode (options: none, cache, freq)
 - `profile_mode`: What type of device is in use, none means desktop (options: none, handheld, htpc)
+- `poll_interval_ms`: Process scanning interval in milliseconds (default: 9000)
 
 ## Profile Modes
 Falcond now supports different profile modes for different device types:
@@ -179,7 +180,8 @@ Please fork the [PikaOS-Linux/falcond](https://github.com/PikaOS-Linux/falcond) 
 
 ## Build Dependencies
 
-zig 0.14.0+
+- zig 0.15.1+
+- libc development headers
 
 ## Building from Source
 
@@ -190,6 +192,24 @@ cd falcond
 zig build -Doptimize=ReleaseFast
 ```
 
+### Build Path Options
+
+All file paths are configurable at build time via `-D` flags. These are comptime values with zero runtime overhead. The defaults match the standard FHS layout used by PikaOS packaging:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-Dconfig-path` | `/etc/falcond/config.conf` | Path to the main config file |
+| `-Dprofiles-dir` | `/usr/share/falcond/profiles` | Path to system profiles directory |
+| `-Duser-profiles-dir` | `/usr/share/falcond/profiles/user` | Path to user profile overrides |
+| `-Dsystem-conf-path` | `/usr/share/falcond/system.conf` | Path to the system process list |
+| `-Dstatus-file` | `/var/lib/falcond/status` | Path to the persistent status file (parent directory is created automatically) |
+| `-Dtmp-status-file` | `/tmp/falcond_status` | Path to the tmpfs status file |
+
+Example building with custom paths:
+```
+zig build -Doptimize=ReleaseFast -Dconfig-path=/opt/falcond/config.conf -Dstatus-file=/run/falcond/status
+```
+
 ## Runtime Dependencies
 
 These should be feature detected by falcond so if not present that specific feature will not be used.
@@ -197,6 +217,7 @@ These should be feature detected by falcond so if not present that specific feat
 power-profiles-daemon or tuned + tuned-ppd
 scx-sched
 Linux kernel patched with AMD 3D vcache support
+dbus and sudo
 
 ## Packaging
 

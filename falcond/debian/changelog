@@ -1,3 +1,12 @@
+falcond (2.0.0-101pika1) pika; urgency=medium
+
+  * feat: rewrite using otter-shell libraries (otter-conf, otter-desktop, otter-utils)
+  * feat: epoll event loop with signalfd, inotify, and netlink proc connector
+  * feat: instant game detection via netlink with /proc poll fallback
+  * feat: build time defined paths
+
+ -- ferreo <ferreo@pika-os.com>  Tue, 04 Mar 2026 12:00:00 +0300
+
 falcond (1.2.3-101pika1) pika; urgency=low
 
   * fix: zombie inhibit processes
