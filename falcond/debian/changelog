@@ -1,3 +1,9 @@
+falcond (2.0.1-101pika1) pika; urgency=medium
+
+  * fix: activate and de-activate issues
+
+ -- ferreo <ferreo@pika-os.com>  Fri, 13 Mar 2026 22:31:00 +0300
+
 falcond (2.0.0-101pika1) pika; urgency=medium
 
   * feat: rewrite using otter-shell libraries (otter-conf, otter-desktop, otter-utils)

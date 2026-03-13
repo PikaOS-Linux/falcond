@@ -205,22 +205,46 @@ pub fn isProtonParent(pid: u32) !bool {
         const ppid = std.fmt.parseInt(u32, ppid_str, 10) catch return false;
         if (ppid <= 1) return false;
 
-        // Use getProcessComm (kernel-cached, no heap alloc) instead of getProcessName
+        // Fast check: comm (kernel-cached, 15 chars) catches "wine" and "reaper"
         if (getProcessComm(ppid)) |comm_buf| {
             const comm = std.mem.sliceTo(&comm_buf, 0);
 
-            if (std.mem.indexOf(u8, comm, "proton") != null or
-                std.mem.indexOf(u8, comm, "wine") != null or
-                std.mem.indexOf(u8, comm, "reaper") != null)
+            if (std.mem.indexOf(u8, comm, "wine") != null or
+                std.mem.indexOf(u8, comm, "reaper") != null or
+                std.mem.indexOf(u8, comm, "umu-run") != null)
             {
                 return true;
             }
         }
 
+        // Slow check: cmdline catches "proton" which runs as a python script
+        // (comm would be "python3", but cmdline contains the full path with "proton")
+        if (getParentCmdlineMatch(ppid, "proton")) return true;
+
         current_pid = ppid;
     }
 
     return false;
+}
+
+/// Read /proc/{pid}/cmdline and check for a substring match.
+/// Used as a fallback when comm is too short or the process is a script
+/// interpreter (e.g. python3 running the proton launch script).
+fn getParentCmdlineMatch(pid: u32, needle: []const u8) bool {
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/cmdline", .{pid}) catch return false;
+    path_buf[path.len] = 0;
+
+    const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
+    if (fd > std.math.maxInt(i32)) return false;
+    defer _ = linux.close(@intCast(fd));
+
+    var buf: [2048]u8 = undefined;
+    const bytes = linux.read(@intCast(fd), &buf, buf.len);
+    if (bytes == 0 or bytes > buf.len) return false;
+
+    // cmdline uses NUL separators — search the raw bytes
+    return std.mem.indexOf(u8, buf[0..@intCast(bytes)], needle) != null;
 }
 
 // ---------------------------------------------------------------------------

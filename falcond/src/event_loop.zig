@@ -289,12 +289,19 @@ fn drainNetlink(self: *Self, events: *EventList) void {
                         if (child_tgid_off + @sizeOf(u32) <= bytes_read) {
                             const parent_tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
                             const child_tgid = std.mem.readInt(u32, buf[child_tgid_off..][0..4], .little);
-                            if (pids.get(parent_tgid)) |profile_idx| {
-                                pids.put(child_tgid, profile_idx) catch {};
-                                if (self.profile_pid_counts) |counts| {
-                                    counts[profile_idx] +|= 1;
+                            // Skip thread creations (child_tgid == parent_tgid)
+                            if (child_tgid != parent_tgid) {
+                                if (pids.get(parent_tgid)) |profile_idx| {
+                                    // Only count new PIDs — duplicate events inflate the count
+                                    const is_new = !pids.contains(child_tgid);
+                                    pids.put(child_tgid, profile_idx) catch {};
+                                    if (is_new) {
+                                        if (self.profile_pid_counts) |counts| {
+                                            counts[profile_idx] +|= 1;
+                                        }
+                                        events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
+                                    }
                                 }
-                                events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
                             }
                         }
                     }

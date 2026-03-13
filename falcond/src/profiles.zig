@@ -127,6 +127,19 @@ pub const ProfileConfig = struct {
     idle_inhibit: bool = false,
 };
 
+/// User override variant — optional fields allow partial overrides that
+/// don't clobber system profile values for unspecified keys.
+pub const UserProfileConfig = struct {
+    name: []const u8 = "",
+    performance_mode: ?bool = null,
+    scx_sched: ?ScxScheduler = null,
+    scx_sched_props: ?ScxMode = null,
+    vcache_mode: ?VCacheMode = null,
+    start_script: ?[]const u8 = null,
+    stop_script: ?[]const u8 = null,
+    idle_inhibit: ?bool = null,
+};
+
 // ── loadProfiles ─────────────────────────────────────────────────────────────
 
 pub fn loadProfiles(allocator: std.mem.Allocator, table: *ProfileTable, dir_path: []const u8) !void {
@@ -184,7 +197,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, table: *ProfileTable, dir_path
 pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !void {
     const user_dir = user_profiles_dir;
 
-    var result = otter_conf.loadDir(ProfileConfig, allocator, user_dir, .{
+    var result = otter_conf.loadDir(UserProfileConfig, allocator, user_dir, .{
         .extension = ".conf",
         .recursive = false,
     }) catch |err| {
@@ -205,6 +218,7 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
 
     for (result.entries) |entry| {
         const cfg = entry.config;
+        const is_override = table.findByName(cfg.name) != null;
 
         const idx = if (table.findByName(cfg.name)) |eidx| blk: {
             log.info("overriding profile '{s}' with user config", .{cfg.name});
@@ -221,17 +235,33 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
         }
 
         var act = &table.activation[idx];
-        act.performance_mode = cfg.performance_mode;
-        act.scx_sched = cfg.scx_sched;
-        act.scx_sched_props = cfg.scx_sched_props;
-        act.vcache_mode = cfg.vcache_mode;
-        act.idle_inhibit = cfg.idle_inhibit;
 
-        if (cfg.start_script.len > 0) {
-            act.start_script.set(cfg.start_script);
-        }
-        if (cfg.stop_script.len > 0) {
-            act.stop_script.set(cfg.stop_script);
+        if (is_override) {
+            // Partial override — only replace fields the user explicitly set
+            if (cfg.performance_mode) |v| act.performance_mode = v;
+            if (cfg.scx_sched) |v| act.scx_sched = v;
+            if (cfg.scx_sched_props) |v| act.scx_sched_props = v;
+            if (cfg.vcache_mode) |v| act.vcache_mode = v;
+            if (cfg.idle_inhibit) |v| act.idle_inhibit = v;
+            if (cfg.start_script) |v| {
+                if (v.len > 0) act.start_script.set(v);
+            }
+            if (cfg.stop_script) |v| {
+                if (v.len > 0) act.stop_script.set(v);
+            }
+        } else {
+            // New user-defined profile — use defaults for unspecified fields
+            act.performance_mode = cfg.performance_mode orelse false;
+            act.scx_sched = cfg.scx_sched orelse .none;
+            act.scx_sched_props = cfg.scx_sched_props orelse .default;
+            act.vcache_mode = cfg.vcache_mode orelse .cache;
+            act.idle_inhibit = cfg.idle_inhibit orelse false;
+            if (cfg.start_script) |v| {
+                if (v.len > 0) act.start_script.set(v);
+            }
+            if (cfg.stop_script) |v| {
+                if (v.len > 0) act.stop_script.set(v);
+            }
         }
 
         user_count += 1;
