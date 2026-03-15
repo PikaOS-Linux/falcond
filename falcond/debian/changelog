@@ -1,3 +1,9 @@
+falcond (2.0.2-101pika1) pika; urgency=medium
+
+  * fix: small runtime profile reload fix
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 16 Mar 2026 00:49:00 +0300
+
 falcond (2.0.1-101pika1) pika; urgency=medium
 
   * fix: activate and de-activate issues

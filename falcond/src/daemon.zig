@@ -424,6 +424,12 @@ fn handleProcesses(self: *Self) void {
 
     var alive = std.AutoHashMap(u32, void).init(alloc);
 
+    // Track the best profile to activate after the scan — specific profiles
+    // take priority over the generic proton fallback.
+    var best_idx: ?u8 = null;
+    var best_pid: u32 = 0;
+    var best_is_proton: bool = true;
+
     var it = processes.iterator();
     while (it.next()) |entry| {
         const pid = entry.key_ptr.*;
@@ -434,8 +440,6 @@ fn handleProcesses(self: *Self) void {
             continue;
         }
 
-        // Fast pre-filter: read /proc/pid/comm and skip processes that
-        // can't possibly match any profile before the expensive match.
         const comm_buf = scanner.getProcessComm(pid) orelse continue;
         const comm = std.mem.sliceTo(&comm_buf, 0);
         if (!self.couldMatch(comm)) continue;
@@ -453,7 +457,26 @@ fn handleProcesses(self: *Self) void {
             self.known_pids.put(pid, result.profile_idx) catch {};
             self.profile_pid_counts[result.profile_idx] += 1;
             alive.put(pid, {}) catch {};
-            self.activateProfile(result.profile_idx, pid);
+
+            // If no active profile, pick the best candidate to activate after scan
+            if (self.active_profile_idx == null) {
+                const dominated = best_idx == null or
+                    (best_is_proton and !result.is_proton);
+                if (dominated) {
+                    best_idx = result.profile_idx;
+                    best_pid = pid;
+                    best_is_proton = result.is_proton;
+                }
+            } else {
+                self.activateProfile(result.profile_idx, pid);
+            }
+        }
+    }
+
+    // Activate deferred best match
+    if (self.active_profile_idx == null) {
+        if (best_idx) |idx| {
+            self.activateProfile(idx, best_pid);
         }
     }
 
@@ -659,9 +682,9 @@ fn runScript(self: *Self, script: []const u8) void {
 
         // Use explicit argv so script content can't escape the sh -c argument
         const argv = [_][]const u8{
-            "sudo", "-u", uid_str,
-            "env", dbus_env, "DISPLAY=:0",
-            "/bin/sh", "-c", script,
+            "sudo",    "-u",     uid_str,
+            "env",     dbus_env, "DISPLAY=:0",
+            "/bin/sh", "-c",     script,
         };
 
         otter_utils.process.spawnArgv(self.allocator, &argv);
