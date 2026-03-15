@@ -518,8 +518,11 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
             }
             return;
         }
-        // Different profile while current is in grace period — deactivate current, activate new
-        if (self.deactivation_deadline != null) {
+
+        // Specific profiles always supersede the generic proton fallback
+        const new_beats_active = (active == self.table.proton_index and idx != self.table.proton_index);
+
+        if (self.deactivation_deadline != null or new_beats_active) {
             self.deactivation_deadline = null;
             self.deactivateProfile(active);
             // Fall through to activate the new profile below

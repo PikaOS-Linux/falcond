@@ -90,7 +90,7 @@ pub fn getProcessName(allocator: std.mem.Allocator, pid: u32) ?[]const u8 {
     if (fd > std.math.maxInt(i32)) return null;
     defer _ = linux.close(@intCast(fd));
 
-    var buffer: [512]u8 = undefined;
+    var buffer: [4096]u8 = undefined;
     const bytes = linux.read(@intCast(fd), &buffer, buffer.len);
     if (bytes == 0 or bytes > buffer.len) return null;
 
@@ -190,7 +190,7 @@ pub fn isProtonParent(pid: u32) !bool {
         const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
         if (fd > std.math.maxInt(i32)) return false;
 
-        var content_buf: [256]u8 = undefined;
+        var content_buf: [1024]u8 = undefined;
         const n = linux.read(@intCast(fd), &content_buf, content_buf.len);
         _ = linux.close(@intCast(fd));
 
@@ -239,11 +239,10 @@ fn getParentCmdlineMatch(pid: u32, needle: []const u8) bool {
     if (fd > std.math.maxInt(i32)) return false;
     defer _ = linux.close(@intCast(fd));
 
-    var buf: [2048]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const bytes = linux.read(@intCast(fd), &buf, buf.len);
     if (bytes == 0 or bytes > buf.len) return false;
 
-    // cmdline uses NUL separators — search the raw bytes
     return std.mem.indexOf(u8, buf[0..@intCast(bytes)], needle) != null;
 }
 
@@ -260,7 +259,7 @@ pub fn findUserForProcess(pid: u32) ?u32 {
     if (fd > std.math.maxInt(i32)) return null;
     defer _ = linux.close(@intCast(fd));
 
-    var content_buf: [256]u8 = undefined;
+    var content_buf: [1024]u8 = undefined;
     const n = linux.read(@intCast(fd), &content_buf, content_buf.len);
     if (n == 0 or n > content_buf.len) return null;
     const content = content_buf[0..@intCast(n)];
