@@ -64,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa, const is_debug = blk: {
         break :blk switch (builtin.mode) {
             .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
-            .ReleaseFast, .ReleaseSmall => .{ std.heap.SmpAllocator, false },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
         };
     };
     allocator = gpa;
