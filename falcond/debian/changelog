@@ -1,3 +1,9 @@
+falcond (2.0.3-101pika1) pika; urgency=medium
+
+  * chore: Update to zig 0.16 + fix misc profile load issues
+
+ -- ferreo <ferreo@pika-os.com>  Sat, 18 Apr 2026 21:49:00 +0300
+
 falcond (2.0.2-101pika2) pika; urgency=medium
 
   * fix: small runtime profile reload fix
