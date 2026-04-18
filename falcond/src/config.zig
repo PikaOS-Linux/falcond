@@ -1,9 +1,11 @@
 const std = @import("std");
 const otter_conf = @import("otter_conf");
 const otter_desktop = @import("otter_desktop");
+const otter_utils = @import("otter_utils");
 const build_options = @import("build_options");
 pub const ScxScheduler = otter_desktop.scx_loader.ScxScheduler;
 pub const ScxMode = otter_desktop.scx_loader.ScxMode;
+inline fn io_global() std.Io { return otter_utils.io.get(); }
 
 const log = std.log.scoped(.config);
 
@@ -113,9 +115,9 @@ pub fn hasChanged(path: []const u8, last_mtime_ns: i128) !bool {
 
 /// Check if a directory's mtime has changed. Returns the new mtime, or null on error.
 pub fn dirMtime(path: []const u8) ?i128 {
-    var dir = std.fs.openDirAbsolute(path, .{}) catch return null;
-    defer dir.close();
-    const stat = dir.stat() catch return null;
+    var dir = std.Io.Dir.openDirAbsolute(io_global(), path, .{}) catch return null;
+    defer dir.close(io_global());
+    const stat = dir.stat(io_global()) catch return null;
     return stat.mtime;
 }
 

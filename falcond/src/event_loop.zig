@@ -30,7 +30,7 @@ const NlMsgHdr = extern struct {
 };
 
 const SockaddrNl = extern struct {
-    nl_family: u16 = linux.AF.NETLINK,
+    nl_family: u16 = posix.AF.NETLINK,
     nl_pad: u16 = 0,
     nl_pid: u32 = 0,
     nl_groups: u32 = 0,
@@ -110,21 +110,21 @@ pub fn init(
     profiles_dir: []const u8,
 ) !Self {
     // 1. epoll
-    const epoll_fd = try posix.epoll_create1(linux.EPOLL.CLOEXEC);
-    errdefer posix.close(epoll_fd);
+    const epoll_raw = posix.system.epoll_create1(linux.EPOLL.CLOEXEC);
+    if (epoll_raw > std.math.maxInt(i32)) return error.EpollCreateFailed;
+    const epoll_fd: posix.fd_t = @intCast(epoll_raw);
+    errdefer _ = posix.system.close(epoll_fd);
 
     // 2. signalfd
-    var mask = linux.sigemptyset();
-    linux.sigaddset(&mask, linux.SIG.TERM);
-    linux.sigaddset(&mask, linux.SIG.HUP);
-    linux.sigaddset(&mask, linux.SIG.INT);
+    var mask = posix.sigemptyset();
+    posix.sigaddset(&mask, posix.SIG.TERM);
+    posix.sigaddset(&mask, posix.SIG.HUP);
+    posix.sigaddset(&mask, posix.SIG.INT);
 
-    const sfd = linux.signalfd(-1, &mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC);
-    if (sfd > std.math.maxInt(i32)) {
+    const signal_fd = posix.signalfd(-1, &mask, linux.SFD.NONBLOCK | linux.SFD.CLOEXEC) catch {
         return error.SignalFdFailed;
-    }
-    const signal_fd: posix.fd_t = @intCast(sfd);
-    errdefer posix.close(signal_fd);
+    };
+    errdefer _ = posix.system.close(signal_fd);
 
     epollAdd(epoll_fd, signal_fd, .signal);
 
@@ -158,11 +158,11 @@ pub fn init(
 pub fn deinit(self: *Self) void {
     if (self.netlink_fd) |fd| {
         _ = sendNetlinkControl(fd, PROC_CN_MCAST_IGNORE);
-        posix.close(fd);
+        _ = posix.system.close(fd);
     }
     self.watcher.deinit();
-    posix.close(self.signal_fd);
-    posix.close(self.epoll_fd);
+    _ = posix.system.close(self.signal_fd);
+    _ = posix.system.close(self.epoll_fd);
     self.* = undefined;
 }
 
@@ -172,7 +172,7 @@ pub fn wait(self: *Self, timeout_ms: u32) EventList {
     var epoll_events: [16]linux.epoll_event = undefined;
     const timeout: i32 = @intCast(@min(timeout_ms, std.math.maxInt(i32)));
 
-    const n = linux.epoll_wait(self.epoll_fd, &epoll_events, epoll_events.len, timeout);
+    const n = posix.system.epoll_wait(self.epoll_fd, &epoll_events, epoll_events.len, timeout);
 
     var events = EventList{};
 
@@ -188,9 +188,14 @@ pub fn wait(self: *Self, timeout_ms: u32) EventList {
     }
 
     for (epoll_events[0..count]) |ev| {
-        const tag = std.meta.intToEnum(FdTag, ev.data.u32) catch {
-            log.warn("epoll: unknown fd tag {d}", .{ev.data.u32});
-            continue;
+        const tag: FdTag = switch (ev.data.u32) {
+            @intFromEnum(FdTag.signal) => .signal,
+            @intFromEnum(FdTag.inotify) => .inotify,
+            @intFromEnum(FdTag.netlink) => .netlink,
+            else => {
+                log.warn("epoll: unknown fd tag {d}", .{ev.data.u32});
+                continue;
+            },
         };
         switch (tag) {
             .signal => self.drainSignals(&events),
@@ -231,12 +236,12 @@ pub fn updateWatches(
 fn drainSignals(self: *Self, events: *EventList) void {
     while (true) {
         var buf: [@sizeOf(linux.signalfd_siginfo)]u8 align(@alignOf(linux.signalfd_siginfo)) = undefined;
-        const n = linux.read(self.signal_fd, &buf, buf.len);
+        const n = posix.system.read(self.signal_fd, &buf, buf.len);
         if (n != @sizeOf(linux.signalfd_siginfo)) break;
         const info: *const linux.signalfd_siginfo = @ptrCast(&buf);
-        const event: ?Event = if (info.signo == linux.SIG.TERM or info.signo == linux.SIG.INT)
+        const event: ?Event = if (info.signo == @intFromEnum(linux.SIG.TERM) or info.signo == @intFromEnum(linux.SIG.INT))
             .signal_term
-        else if (info.signo == linux.SIG.HUP)
+        else if (info.signo == @intFromEnum(linux.SIG.HUP))
             .signal_hup
         else
             null;
@@ -259,7 +264,7 @@ fn drainNetlink(self: *Self, events: *EventList) void {
     var buf: [16384]u8 align(@alignOf(NlMsgHdr)) = undefined;
 
     while (true) {
-        const n = linux.read(fd, &buf, buf.len);
+        const n = posix.system.read(fd, &buf, buf.len);
         if (n == 0 or n > buf.len) break;
         const bytes_read: usize = @intCast(n);
 
@@ -341,7 +346,7 @@ fn epollAdd(epoll_fd: posix.fd_t, fd: posix.fd_t, tag: FdTag) void {
         .events = linux.EPOLL.IN,
         .data = .{ .u32 = @intFromEnum(tag) },
     };
-    const rc = linux.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, fd, &ev);
+    const rc = posix.system.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, fd, &ev);
     if (rc > std.math.maxInt(i32)) {
         log.warn("epoll_ctl add failed for fd {}", .{fd});
     }
@@ -350,7 +355,7 @@ fn epollAdd(epoll_fd: posix.fd_t, fd: posix.fd_t, tag: FdTag) void {
 // ── Private: netlink setup ──────────────────────────────────────────────────
 
 fn initNetlink(epoll_fd: posix.fd_t) ?posix.fd_t {
-    const fd_raw = linux.socket(linux.AF.NETLINK, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, NETLINK_CONNECTOR);
+    const fd_raw = posix.system.socket(posix.AF.NETLINK, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, NETLINK_CONNECTOR);
     if (fd_raw > std.math.maxInt(i32)) {
         log.info("netlink proc connector unavailable (socket failed), falling back to poll-only mode", .{});
         return null;
@@ -359,19 +364,19 @@ fn initNetlink(epoll_fd: posix.fd_t) ?posix.fd_t {
 
     var addr = SockaddrNl{
         .nl_groups = CN_IDX_PROC,
-        .nl_pid = @intCast(linux.getpid()),
+        .nl_pid = @intCast(posix.system.getpid()),
     };
 
-    const bind_rc = linux.bind(fd, @ptrCast(&addr), @sizeOf(SockaddrNl));
+    const bind_rc = posix.system.bind(fd, @ptrCast(&addr), @sizeOf(SockaddrNl));
     if (bind_rc > std.math.maxInt(i32)) {
         log.info("netlink proc connector unavailable (bind failed), falling back to poll-only mode", .{});
-        posix.close(fd);
+        _ = posix.system.close(fd);
         return null;
     }
 
     if (!sendNetlinkControl(fd, PROC_CN_MCAST_LISTEN)) {
         log.info("netlink proc connector unavailable (subscribe failed), falling back to poll-only mode", .{});
-        posix.close(fd);
+        _ = posix.system.close(fd);
         return null;
     }
 
@@ -387,7 +392,7 @@ fn sendNetlinkControl(fd: posix.fd_t, mode: u32) bool {
             .nlmsg_type = @intFromEnum(linux.NetlinkMessageType.DONE),
             .nlmsg_flags = 0,
             .nlmsg_seq = 0,
-            .nlmsg_pid = @intCast(linux.getpid()),
+            .nlmsg_pid = @intCast(posix.system.getpid()),
         },
         .cn_msg = .{
             .id = .{ .idx = CN_IDX_PROC, .val = CN_VAL_PROC },
@@ -400,6 +405,6 @@ fn sendNetlinkControl(fd: posix.fd_t, mode: u32) bool {
     };
 
     const buf: [*]const u8 = @ptrCast(&msg);
-    const rc = linux.sendto(fd, buf, @sizeOf(SubscribeMsg), 0, null, 0);
+    const rc = posix.system.sendto(fd, buf, @sizeOf(SubscribeMsg), 0, null, 0);
     return rc == @sizeOf(SubscribeMsg);
 }

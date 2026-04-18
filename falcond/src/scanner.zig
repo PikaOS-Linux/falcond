@@ -43,14 +43,11 @@ pub fn getProcessComm(pid: u32) ?[16]u8 {
     // Build null-terminated relative path "PID/comm\0" for openat
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/comm", .{pid}) catch return null;
-    path_buf[path.len] = 0;
-
-    const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
-    if (fd > std.math.maxInt(i32)) return null;
-    defer _ = linux.close(@intCast(fd));
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
 
     var buf: [16]u8 = .{0} ** 16;
-    const n = linux.read(@intCast(fd), &buf, 16);
+    const n = posix.read(fd, &buf) catch return null;
     if (n == 0 or n > 16) return null;
     // Strip trailing newline
     if (buf[@intCast(n - 1)] == '\n') buf[@intCast(n - 1)] = 0;
@@ -59,20 +56,19 @@ pub fn getProcessComm(pid: u32) ?[16]u8 {
 
 /// Cached fd for /proc, opened once at startup. Used by getProcessComm
 /// for openat() to avoid full path resolution on every call.
-var proc_dir_fd: linux.fd_t = 0;
+var proc_dir_fd: posix.fd_t = 0;
 
 pub fn initProcFd() void {
-    const fd = linux.openat(linux.AT.FDCWD, "/proc", .{ .DIRECTORY = true }, 0);
-    if (fd > std.math.maxInt(i32)) {
+    const fd = posix.openat(posix.AT.FDCWD, "/proc", .{ .DIRECTORY = true }, 0) catch {
         log.err("failed to open /proc", .{});
         return;
-    }
-    proc_dir_fd = @intCast(fd);
+    };
+    proc_dir_fd = fd;
 }
 
 pub fn deinitProcFd() void {
     if (proc_dir_fd > 0) {
-        _ = linux.close(proc_dir_fd);
+        _ = posix.system.close(proc_dir_fd);
         proc_dir_fd = 0;
     }
 }
@@ -84,14 +80,11 @@ pub fn deinitProcFd() void {
 pub fn getProcessName(allocator: std.mem.Allocator, pid: u32) ?[]const u8 {
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/cmdline", .{pid}) catch return null;
-    path_buf[path.len] = 0;
-
-    const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
-    if (fd > std.math.maxInt(i32)) return null;
-    defer _ = linux.close(@intCast(fd));
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
 
     var buffer: [4096]u8 = undefined;
-    const bytes = linux.read(@intCast(fd), &buffer, buffer.len);
+    const bytes = posix.read(fd, &buffer) catch return null;
     if (bytes == 0 or bytes > buffer.len) return null;
 
     const end = std.mem.indexOfScalar(u8, buffer[0..bytes], 0) orelse bytes;
@@ -123,7 +116,7 @@ pub fn scanProcesses(allocator: std.mem.Allocator) !std.AutoHashMap(u32, []const
     var pids = std.AutoHashMap(u32, []const u8).init(allocator);
 
     // Reuse cached proc_dir_fd; seek to start for a fresh directory read
-    _ = linux.lseek(proc_dir_fd, 0, linux.SEEK.SET);
+    _ = posix.system.lseek(proc_dir_fd, 0, posix.SEEK.SET);
 
     var buffer: [8192]u8 = undefined;
     while (true) {
@@ -185,14 +178,14 @@ pub fn isProtonParent(pid: u32) !bool {
         // Open /proc/{pid}/status via openat on cached proc_dir_fd
         var path_buf: [32]u8 = undefined;
         const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/status", .{current_pid}) catch return false;
-        path_buf[path.len] = 0;
-
-        const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
-        if (fd > std.math.maxInt(i32)) return false;
+        const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return false;
 
         var content_buf: [1024]u8 = undefined;
-        const n = linux.read(@intCast(fd), &content_buf, content_buf.len);
-        _ = linux.close(@intCast(fd));
+        const n = posix.read(fd, &content_buf) catch {
+            _ = posix.system.close(fd);
+            return false;
+        };
+        _ = posix.system.close(fd);
 
         if (n == 0 or n > content_buf.len) return false;
         const content = content_buf[0..@intCast(n)];
@@ -233,14 +226,11 @@ pub fn isProtonParent(pid: u32) !bool {
 fn getParentCmdlineMatch(pid: u32, needle: []const u8) bool {
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/cmdline", .{pid}) catch return false;
-    path_buf[path.len] = 0;
-
-    const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
-    if (fd > std.math.maxInt(i32)) return false;
-    defer _ = linux.close(@intCast(fd));
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return false;
+    defer _ = posix.system.close(fd);
 
     var buf: [4096]u8 = undefined;
-    const bytes = linux.read(@intCast(fd), &buf, buf.len);
+    const bytes = posix.read(fd, &buf) catch return false;
     if (bytes == 0 or bytes > buf.len) return false;
 
     return std.mem.indexOf(u8, buf[0..@intCast(bytes)], needle) != null;
@@ -253,14 +243,11 @@ fn getParentCmdlineMatch(pid: u32, needle: []const u8) bool {
 pub fn findUserForProcess(pid: u32) ?u32 {
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/status", .{pid}) catch return null;
-    path_buf[path.len] = 0;
-
-    const fd = linux.openat(proc_dir_fd, @ptrCast(path_buf[0 .. path.len + 1]), .{}, 0);
-    if (fd > std.math.maxInt(i32)) return null;
-    defer _ = linux.close(@intCast(fd));
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
 
     var content_buf: [1024]u8 = undefined;
-    const n = linux.read(@intCast(fd), &content_buf, content_buf.len);
+    const n = posix.read(fd, &content_buf) catch return null;
     if (n == 0 or n > content_buf.len) return null;
     const content = content_buf[0..@intCast(n)];
 

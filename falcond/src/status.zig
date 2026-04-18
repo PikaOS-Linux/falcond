@@ -1,4 +1,5 @@
 const std = @import("std");
+const otter_utils = @import("otter_utils");
 const ProfileTable = @import("profiles.zig").ProfileTable;
 const otter_desktop = @import("otter_desktop");
 const PowerProfiles = otter_desktop.PowerProfiles;
@@ -8,6 +9,7 @@ const Inhibitor = @import("inhibitor.zig");
 const vcache = @import("vcache.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.status);
+inline fn io_global() std.Io { return otter_utils.io.get(); }
 
 // ── Paths (configurable via build options, zero runtime cost) ────────────────
 
@@ -59,10 +61,11 @@ fn writeStatusFile(
     restore_power_profile: ?[:0]const u8,
     inhibitor: *const Inhibitor,
 ) !void {
-    // Build status content in a stack buffer.
-    var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const w = fbs.writer();
+    var content_buf: std.ArrayList(u8) = .empty;
+    defer content_buf.deinit(std.heap.page_allocator);
+    var allocating_writer: std.Io.Writer.Allocating = .fromArrayList(std.heap.page_allocator, &content_buf);
+    defer content_buf = allocating_writer.toArrayList();
+    const w = &allocating_writer.writer;
 
     // ── FEATURES ────────────────────────────────────────────────────────
     try w.writeAll("FEATURES:\n");
@@ -177,25 +180,25 @@ fn writeStatusFile(
         try w.writeAll("\n");
     }
 
-    const content = fbs.getWritten();
+    const content = content_buf.items;
 
     // Write to permanent status file
-    std.fs.makeDirAbsolute(status_dir) catch |err| switch (err) {
+    std.Io.Dir.cwd().createDirPath(io_global(), status_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
     {
-        const file = try std.fs.createFileAbsolute(status_file, .{ .mode = 0o644 });
-        defer file.close();
-        try file.writeAll(content);
+        const file = try std.Io.Dir.createFileAbsolute(io_global(), status_file, .{});
+        defer file.close(io_global());
+        try file.writeStreamingAll(io_global(), content);
     }
 
     // Write to tmp status file
     {
-        const tmp_file = try std.fs.createFileAbsolute(tmp_status_file, .{ .mode = 0o644 });
-        defer tmp_file.close();
-        try tmp_file.writeAll(content);
+        const tmp_file = try std.Io.Dir.createFileAbsolute(io_global(), tmp_status_file, .{});
+        defer tmp_file.close(io_global());
+        try tmp_file.writeStreamingAll(io_global(), content);
     }
 }
 

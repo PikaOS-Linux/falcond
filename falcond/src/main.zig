@@ -2,6 +2,7 @@ const std = @import("std");
 const Daemon = @import("daemon.zig");
 const config_mod = @import("config.zig");
 const builtin = @import("builtin");
+const otter_utils = @import("otter_utils");
 
 pub const std_options = std.Options{
     .log_level = if (builtin.mode == .Debug) .debug else .info,
@@ -53,16 +54,17 @@ fn free(ctx: *anyopaque, buf: []u8, log2_buf_align: std.mem.Alignment, ret_addr:
     gpa_vtable.free(gpa_ptr, buf, log2_buf_align, ret_addr);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     std.log.info("starting falcond...", .{});
+    otter_utils.io.install(init.io);
+
     var allocator: std.mem.Allocator = undefined;
     var tracker = AllocTracker{};
 
-    var release_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa, const is_debug = blk: {
         break :blk switch (builtin.mode) {
             .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
-            .ReleaseFast, .ReleaseSmall => .{ release_gpa.allocator(), false },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.SmpAllocator, false },
         };
     };
     allocator = gpa;
@@ -92,21 +94,25 @@ pub fn main() !void {
         };
     }
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip(); // argv[0]
 
-    const oneshot = for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--oneshot")) break true;
-    } else false;
+    var oneshot = false;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--oneshot")) {
+            oneshot = true;
+            break;
+        }
+    }
 
     // Block SIGTERM + SIGHUP so they arrive via signalfd instead of killing the process
     {
-        const linux = std.os.linux;
-        var mask = linux.sigemptyset();
-        linux.sigaddset(&mask, linux.SIG.TERM);
-        linux.sigaddset(&mask, linux.SIG.HUP);
-        linux.sigaddset(&mask, linux.SIG.INT);
-        _ = linux.sigprocmask(linux.SIG.BLOCK, &mask, null);
+        var mask = std.posix.sigemptyset();
+        std.posix.sigaddset(&mask, std.posix.SIG.TERM);
+        std.posix.sigaddset(&mask, std.posix.SIG.HUP);
+        std.posix.sigaddset(&mask, std.posix.SIG.INT);
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &mask, null);
     }
 
     var daemon = try Daemon.init(allocator, config_mod.default_config_path, oneshot);

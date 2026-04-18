@@ -4,18 +4,21 @@
 //! Valid values: "frequency", "cache"
 
 const std = @import("std");
+const otter_utils = @import("otter_utils");
 const log = std.log.scoped(.vcache);
+inline fn io_global() std.Io { return otter_utils.io.get(); }
 
 const sysfs_path = "/sys/bus/platform/drivers/amd_x3d_vcache/AMDI0101:00/amd_x3d_mode";
 
 /// Read the current V-Cache mode from sysfs.
 /// Returns "frequency" or "cache", or null if unavailable.
 pub fn read() ?[]const u8 {
-    const file = std.fs.openFileAbsolute(sysfs_path, .{}) catch return null;
-    defer file.close();
+    const io = io_global();
+    const file = std.Io.Dir.openFileAbsolute(io, sysfs_path, .{}) catch return null;
+    defer file.close(io);
 
     var buf: [32]u8 = undefined;
-    const len = file.readAll(&buf) catch return null;
+    const len = file.readPositionalAll(io, &buf, 0) catch return null;
     const raw = std.mem.trim(u8, buf[0..len], " \n\r\t");
 
     if (std.mem.eql(u8, raw, "cache")) return "cache";
@@ -25,7 +28,8 @@ pub fn read() ?[]const u8 {
 
 /// Write a raw sysfs value ("frequency" or "cache") to the V-Cache mode node.
 pub fn write(value: []const u8) !void {
-    const file = std.fs.openFileAbsolute(sysfs_path, .{ .mode = .write_only }) catch |err| {
+    const io = io_global();
+    const file = std.Io.Dir.openFileAbsolute(io, sysfs_path, .{ .mode = .write_only }) catch |err| {
         switch (err) {
             error.FileNotFound, error.NoDevice => {
                 log.debug("V-Cache sysfs not found — no 3D V-Cache hardware", .{});
@@ -37,9 +41,9 @@ pub fn write(value: []const u8) !void {
             },
         }
     };
-    defer file.close();
+    defer file.close(io);
 
-    file.writeAll(value) catch |err| {
+    file.writeStreamingAll(io, value) catch |err| {
         log.err("failed to write V-Cache mode '{s}': {}", .{ value, err });
         return err;
     };

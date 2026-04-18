@@ -20,6 +20,7 @@ const vcache = @import("vcache.zig");
 const EventLoop = @import("event_loop.zig");
 
 const log = std.log.scoped(.daemon);
+const posix = std.posix;
 
 const Self = @This();
 
@@ -29,7 +30,8 @@ table: ProfileTable,
 active_profile_idx: ?u8 = null,
 active_pid: ?u32 = null,
 active_uid: ?u32 = null,
-queued_indices: std.ArrayListUnmanaged(u8) = .{},
+queued_indices: std.ArrayListUnmanaged(u8) = .empty,
+reload_preferred_profile: profiles_mod.FixedStr(profiles_mod.max_name_len) = .{},
 known_pids: std.AutoHashMap(u32, u8),
 profile_pid_counts: [profiles_mod.max_profiles]u16 = .{0} ** profiles_mod.max_profiles,
 power_profiles: ?PowerProfiles = null,
@@ -195,11 +197,11 @@ pub fn run(self: *Self) !void {
                     };
                     self.updateStatus();
                     self.handleProcesses();
-                    self.last_reload_ns = std.time.nanoTimestamp();
+                    self.last_reload_ns = nowNs();
                     self.status_dirty = true;
                 },
                 .config_changed => {
-                    const now = std.time.nanoTimestamp();
+                    const now = nowNs();
                     if (now - self.last_reload_ns >= reload_debounce_ns) {
                         log.info("config or profiles changed, reloading", .{});
                         self.reload() catch |err| {
@@ -221,7 +223,7 @@ pub fn run(self: *Self) !void {
                 .proc_exit => |pid| self.handleExitEvent(pid),
                 .timeout => {
                     // Only run full /proc scan at the configured interval, not during fast-poll
-                    const now = std.time.nanoTimestamp();
+                    const now = nowNs();
                     const interval_ns: i128 = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
                     if (now - self.last_full_scan_ns >= interval_ns) {
                         self.handleProcesses();
@@ -287,12 +289,12 @@ fn isWinePreloader(name: []const u8) bool {
 }
 
 fn queueRecheck(self: *Self, pid: u32, retries: u8) void {
-    const deadline = std.time.nanoTimestamp() + recheck_delay_ns;
+    const deadline = nowNs() + recheck_delay_ns;
     self.pending_rechecks.append(.{ .pid = pid, .deadline_ns = deadline, .retries = retries }) catch {};
 }
 
 fn processPendingRechecks(self: *Self) void {
-    const now = std.time.nanoTimestamp();
+    const now = nowNs();
     var write: usize = 0;
     for (self.pending_rechecks.constSlice()) |entry| {
         if (now < entry.deadline_ns) {
@@ -362,7 +364,7 @@ fn handleExitEvent(self: *Self, pid: u32) void {
         if (active_idx == profile_idx) {
             if (!self.hasAnyPidForProfile(profile_idx)) {
                 // Start grace period — Wine/Proton processes re-exec frequently
-                self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+                self.deactivation_deadline = nowNs() + deactivation_grace_ns;
                 log.info("last pid for '{s}' exited, grace period started", .{self.table.names[profile_idx].get()});
             }
         }
@@ -380,6 +382,12 @@ fn reload(self: *Self) !void {
         new_config.config.profile_mode,
     );
     errdefer self.allocator.free(new_dir);
+
+    if (self.active_profile_idx) |idx| {
+        self.reload_preferred_profile.set(self.table.names[idx].get());
+    } else {
+        self.reload_preferred_profile.len = 0;
+    }
 
     // New state ready — safe to tear down old state
     if (self.active_profile_idx) |idx| {
@@ -429,6 +437,10 @@ fn handleProcesses(self: *Self) void {
     var best_idx: ?u8 = null;
     var best_pid: u32 = 0;
     var best_is_proton: bool = true;
+    const preferred_idx = if (self.reload_preferred_profile.isEmpty())
+        null
+    else
+        self.table.findByName(self.reload_preferred_profile.get());
 
     var it = processes.iterator();
     while (it.next()) |entry| {
@@ -460,9 +472,7 @@ fn handleProcesses(self: *Self) void {
 
             // If no active profile, pick the best candidate to activate after scan
             if (self.active_profile_idx == null) {
-                const dominated = best_idx == null or
-                    (best_is_proton and !result.is_proton);
-                if (dominated) {
+                if (shouldPreferCandidate(&self.table, best_idx, best_pid, best_is_proton, result, pid, preferred_idx)) {
                     best_idx = result.profile_idx;
                     best_pid = pid;
                     best_is_proton = result.is_proton;
@@ -479,9 +489,10 @@ fn handleProcesses(self: *Self) void {
             self.activateProfile(idx, best_pid);
         }
     }
+    self.reload_preferred_profile.len = 0;
 
     if (!self.oneshot) {
-        var to_remove: std.ArrayListUnmanaged(u32) = .{};
+        var to_remove: std.ArrayListUnmanaged(u32) = .empty;
         var kit = self.known_pids.iterator();
         while (kit.next()) |entry| {
             if (!alive.contains(entry.key_ptr.*)) {
@@ -499,7 +510,7 @@ fn handleProcesses(self: *Self) void {
                     // Use same grace period as handleExitEvent — Wine/Proton
                     // children may not have been discovered yet.
                     if (self.deactivation_deadline == null) {
-                        self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+                        self.deactivation_deadline = nowNs() + deactivation_grace_ns;
                         log.info("last pid for '{s}' gone from /proc, grace period started", .{self.table.names[profile_idx].get()});
                     }
                 }
@@ -519,6 +530,13 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
             return;
         }
 
+        if (shouldIgnoreProtonFallback(active, idx, self.table.proton_index)) {
+            log.info("ignoring proton fallback while specific profile '{s}' is active", .{
+                self.table.names[active].get(),
+            });
+            return;
+        }
+
         // Specific profiles always supersede the generic proton fallback
         const new_beats_active = (active == self.table.proton_index and idx != self.table.proton_index);
 
@@ -527,6 +545,13 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
             self.deactivateProfile(active);
             // Fall through to activate the new profile below
         } else {
+            if (shouldIgnoreProtonFallback(active, idx, self.table.proton_index)) {
+                log.info("ignoring queued proton fallback while specific profile '{s}' remains active", .{
+                    self.table.names[active].get(),
+                });
+                return;
+            }
+
             // Current profile still has PIDs — queue the new one if not already queued
             for (self.queued_indices.items) |qi| {
                 if (qi == idx) return;
@@ -668,11 +693,10 @@ fn deactivateProfile(self: *Self, idx: u8) void {
 
 /// Run a profile script, dropping to the process owner's session when running as root.
 fn runScript(self: *Self, script: []const u8) void {
-    const linux = std.os.linux;
-    if (linux.geteuid() == 0) {
+    if (posix.system.geteuid() == 0) {
         const uid = self.active_uid orelse {
             log.warn("no saved uid, running script as root", .{});
-            otter_utils.process.spawnCommand(self.allocator, script);
+            otter_utils.process.spawnCommand(otter_utils.io.get(), script);
             return;
         };
 
@@ -690,9 +714,9 @@ fn runScript(self: *Self, script: []const u8) void {
             "/bin/sh", "-c",     script,
         };
 
-        otter_utils.process.spawnArgv(self.allocator, &argv);
+        otter_utils.process.spawnArgv(otter_utils.io.get(), &argv);
     } else {
-        otter_utils.process.spawnCommand(self.allocator, script);
+        otter_utils.process.spawnCommand(otter_utils.io.get(), script);
     }
 }
 
@@ -702,6 +726,45 @@ fn isSystemProcess(self: *Self, name: []const u8) bool {
         if (std.ascii.eqlIgnoreCase(name, sys_proc)) return true;
     }
     return false;
+}
+
+fn shouldPreferCandidate(
+    table: *const ProfileTable,
+    current_idx: ?u8,
+    current_pid: u32,
+    current_is_proton: bool,
+    candidate: MatchResult,
+    candidate_pid: u32,
+    preferred_idx: ?u8,
+) bool {
+    const idx = current_idx orelse return true;
+
+    if (preferred_idx) |preferred| {
+        const candidate_is_preferred = candidate.profile_idx == preferred;
+        const current_is_preferred = idx == preferred;
+        if (candidate_is_preferred != current_is_preferred) {
+            return candidate_is_preferred;
+        }
+    }
+
+    if (current_is_proton != candidate.is_proton) {
+        return current_is_proton and !candidate.is_proton;
+    }
+
+    if (candidate.profile_idx != idx) {
+        const candidate_name = table.names[candidate.profile_idx].get();
+        const current_name = table.names[idx].get();
+        const order = std.mem.order(u8, candidate_name, current_name);
+        if (order != .eq) {
+            return order == .lt;
+        }
+    }
+
+    return candidate_pid < current_pid;
+}
+
+fn shouldIgnoreProtonFallback(active_idx: u8, candidate_idx: u8, proton_idx: u8) bool {
+    return candidate_idx == proton_idx and active_idx != proton_idx;
 }
 
 fn hasAnyPidForProfile(self: *Self, profile_idx: u8) bool {
@@ -741,7 +804,7 @@ fn computeTimeout(self: *Self) u32 {
 
 fn checkDeactivationGrace(self: *Self) void {
     const deadline = self.deactivation_deadline orelse return;
-    if (std.time.nanoTimestamp() < deadline) return;
+    if (nowNs() < deadline) return;
 
     const idx = self.active_profile_idx orelse {
         self.deactivation_deadline = null;
@@ -757,7 +820,7 @@ fn checkDeactivationGrace(self: *Self) void {
 
     // Pending rechecks may resolve to the game (wine preloader → game exe) — extend grace
     if (self.pending_rechecks.len > 0) {
-        self.deactivation_deadline = std.time.nanoTimestamp() + deactivation_grace_ns;
+        self.deactivation_deadline = nowNs() + deactivation_grace_ns;
         log.debug("extending grace — {d} pending rechecks", .{self.pending_rechecks.len});
         return;
     }
@@ -800,4 +863,55 @@ fn updateStatus(self: *Self) void {
         self.restore_power_profile,
         &self.inhibitor,
     );
+}
+
+fn nowNs() i128 {
+    var ts: posix.timespec = undefined;
+    if (posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+test "shouldPreferCandidate prefers specific profile over proton fallback" {
+    var table = ProfileTable.init();
+    defer table.deinit(std.testing.allocator);
+
+    const proton_idx = try table.addProfile("proton");
+    const game_idx = try table.addProfile("Game.exe");
+    table.proton_index = proton_idx;
+
+    try std.testing.expect(shouldPreferCandidate(
+        &table,
+        proton_idx,
+        200,
+        true,
+        .{ .profile_idx = game_idx, .is_proton = false },
+        300,
+        null,
+    ));
+}
+
+test "shouldPreferCandidate preserves pre-reload active profile when still running" {
+    var table = ProfileTable.init();
+    defer table.deinit(std.testing.allocator);
+
+    const alpha_idx = try table.addProfile("Alpha.exe");
+    const beta_idx = try table.addProfile("Beta.exe");
+
+    try std.testing.expect(shouldPreferCandidate(
+        &table,
+        alpha_idx,
+        101,
+        false,
+        .{ .profile_idx = beta_idx, .is_proton = false },
+        202,
+        beta_idx,
+    ));
+}
+
+test "shouldIgnoreProtonFallback only blocks generic proton behind specific profiles" {
+    try std.testing.expect(shouldIgnoreProtonFallback(3, 1, 1));
+    try std.testing.expect(!shouldIgnoreProtonFallback(1, 1, 1));
+    try std.testing.expect(!shouldIgnoreProtonFallback(3, 4, 1));
 }

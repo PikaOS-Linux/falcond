@@ -12,7 +12,7 @@
     // In a future version of Zig it will be used for package deduplication.
     .version = "2.0.0",
     .fingerprint = 0x31d9d78a54cab47b,
-    .minimum_zig_version = "0.15.1",
+    .minimum_zig_version = "0.16.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -21,16 +21,16 @@
     // internet connectivity.
     .dependencies = .{
         .otter_conf = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.9.4",
-            .hash = "otter_conf-1.0.0-d7vdxEWbAQDN62X7TrhhqEVu2kk-7okjqoB_7jZlKq34",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.10.1",
+            .hash = "otter_conf-1.0.0-d7vdxPxJAgDQRdgwG0PzY2OEt5H7cGHxFzX0JgUgBrgE",
         },
         .otter_desktop = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-desktop#v0.9.4",
-            .hash = "otter_desktop-0.6.0-nwUfzVOXHABHzwAN1U0coV-Q4l0vft0CVasbYF1cX-sA",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-desktop#v0.10.0",
+            .hash = "otter_desktop-0.6.0-nwUfzferLwC-ZCkTzhA9ifLtDbzvjQCp47wkgFdiQ8gl",
         },
         .otter_utils = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-utils#v0.9.4",
-            .hash = "otter_utils-0.5.0-DYWsu2CNAAA5Z4cIiM6TShCBppEf1lXoX2STVWM6JSgM",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-utils#v0.10.0",
+            .hash = "otter_utils-0.5.0-DYWsuwukAACB2XwKLX1V3TiOSwR32unPuxTc9hQjL-sH",
         },
     },
 

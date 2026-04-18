@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
-const linux = std.os.linux;
+const otter_utils = @import("otter_utils");
 const scanner = @import("scanner.zig");
 const log = std.log.scoped(.inhibitor);
 
@@ -72,7 +72,8 @@ pub fn uninhibit(self: *Self) void {
                 log.warn("failed to kill systemd-inhibit pid {d}: {}", .{ pid, err });
             }
         };
-        _ = posix.waitpid(pid, 0);
+        var status: c_int = 0;
+        _ = std.posix.system.waitpid(pid, &status, 0);
         self.systemd_pid = null;
     }
 
@@ -90,10 +91,10 @@ fn inhibitDBus(self: *Self, app_name: []const u8, reason: []const u8) !u32 {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var argv = std.ArrayListUnmanaged([]const u8){};
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
 
     // Root can't access user session bus directly, so use sudo
-    if (linux.geteuid() == 0) {
+    if (posix.system.geteuid() == 0) {
         const uid = self.target_uid orelse return error.NoTargetUser;
         try argv.append(alloc, "sudo");
         try argv.append(alloc, "-u");
@@ -119,25 +120,20 @@ fn inhibitDBus(self: *Self, app_name: []const u8, reason: []const u8) !u32 {
         reason,
     });
 
-    var child = std.process.Child.init(argv.items, self.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    const result = try std.process.run(self.allocator, otter_utils.io.get(), .{
+        .argv = argv.items,
+        .stdout_limit = .limited(256),
+        .stderr_limit = .limited(256),
+    });
+    defer self.allocator.free(result.stdout);
+    defer self.allocator.free(result.stderr);
 
-    try child.spawn();
-
-    // Must read before wait() or the pipe is closed
-    var stdout_buf: [256]u8 = undefined;
-    const stdout_len = if (child.stdout) |out| out.readAll(&stdout_buf) catch 0 else 0;
-    const stdout = std.mem.trim(u8, stdout_buf[0..stdout_len], " \n\r\t");
-
-    const result = try child.wait();
-
-    if (result.Exited != 0) {
-        log.warn("busctl inhibit exited with {d}", .{result.Exited});
+    if (result.term != .exited or result.term.exited != 0) {
+        log.warn("busctl inhibit exited with {}", .{result.term});
         return error.CommandFailed;
     }
 
+    const stdout = std.mem.trim(u8, result.stdout, " \n\r\t");
     const cookie = parseBusctlUint(stdout) orelse {
         log.warn("failed to parse inhibit cookie from: '{s}'", .{stdout});
         return error.ParseError;
@@ -152,9 +148,9 @@ fn uninhibitDBus(self: *Self, cookie: u32) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var argv = std.ArrayListUnmanaged([]const u8){};
+    var argv: std.ArrayListUnmanaged([]const u8) = .empty;
 
-    if (linux.geteuid() == 0) {
+    if (posix.system.geteuid() == 0) {
         const uid = self.target_uid orelse return error.NoTargetUser;
         try argv.append(alloc, "sudo");
         try argv.append(alloc, "-u");
@@ -181,16 +177,16 @@ fn uninhibitDBus(self: *Self, cookie: u32) !void {
         cookie_str,
     });
 
-    var child = std.process.Child.init(argv.items, self.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Pipe;
+    const result = try std.process.run(self.allocator, otter_utils.io.get(), .{
+        .argv = argv.items,
+        .stdout_limit = .limited(0),
+        .stderr_limit = .limited(256),
+    });
+    defer self.allocator.free(result.stdout);
+    defer self.allocator.free(result.stderr);
 
-    try child.spawn();
-    const result = try child.wait();
-
-    if (result.Exited != 0) {
-        log.warn("busctl uninhibit exited with {d}", .{result.Exited});
+    if (result.term != .exited or result.term.exited != 0) {
+        log.warn("busctl uninhibit exited with {}", .{result.term});
         return error.CommandFailed;
     }
 
@@ -216,21 +212,21 @@ fn inhibitLogin1(self: *Self, app_name: []const u8, reason: []const u8) !void {
         "infinity",
     };
 
-    var child = std.process.Child.init(&argv, self.allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    try child.spawn();
+    const child = try std.process.spawn(otter_utils.io.get(), .{
+        .argv = &argv,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
     self.systemd_pid = child.id;
-    log.info("started systemd-inhibit (pid {d})", .{child.id});
+    log.info("started systemd-inhibit (pid {?d})", .{child.id});
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Parse busctl's "u <cookie>" response format.
 fn parseBusctlUint(output: []const u8) ?u32 {
-    const trimmed = std.mem.trimLeft(u8, output, "u ");
+    const trimmed = std.mem.trim(u8, output, "u ");
     const end = std.mem.indexOfScalar(u8, trimmed, ' ') orelse trimmed.len;
     return std.fmt.parseInt(u32, trimmed[0..end], 10) catch null;
 }
