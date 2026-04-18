@@ -21,8 +21,8 @@
     // internet connectivity.
     .dependencies = .{
         .otter_conf = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.10.1",
-            .hash = "otter_conf-1.0.0-d7vdxPxJAgDQRdgwG0PzY2OEt5H7cGHxFzX0JgUgBrgE",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.10.2",
+            .hash = "otter_conf-1.0.0-d7vdxA1KAgBoH7Iep3g616vLN4mQqiYRKoBhnmTz4aNT",
         },
         .otter_desktop = .{
             .url = "git+https://git.pika-os.com/otter-shell/otter-desktop#v0.10.0",

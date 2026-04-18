@@ -109,13 +109,11 @@ pub fn init(
     config_path: []const u8,
     profiles_dir: []const u8,
 ) !Self {
-    // 1. epoll
     const epoll_raw = posix.system.epoll_create1(linux.EPOLL.CLOEXEC);
     if (epoll_raw < 0) return error.EpollCreateFailed;
     const epoll_fd: posix.fd_t = @intCast(epoll_raw);
     errdefer _ = posix.system.close(epoll_fd);
 
-    // 2. signalfd
     var mask = posix.sigemptyset();
     posix.sigaddset(&mask, posix.SIG.TERM);
     posix.sigaddset(&mask, posix.SIG.HUP);
@@ -128,7 +126,6 @@ pub fn init(
 
     epollAdd(epoll_fd, signal_fd, .signal);
 
-    // 3. inotify via otter_utils
     var watcher = try otter_utils.inotify.Watcher.init(allocator);
     errdefer watcher.deinit();
 
@@ -144,7 +141,6 @@ pub fn init(
 
     epollAdd(epoll_fd, watcher.getFd(), .inotify);
 
-    // 4. netlink proc connector (fallible)
     const netlink_fd = initNetlink(epoll_fd);
 
     return .{
@@ -177,7 +173,6 @@ pub fn wait(self: *Self, timeout_ms: u32) EventList {
     var events = EventList{};
 
     if (n < 0) {
-        // Error or signal interruption — return empty, loop will retry
         return events;
     }
 
@@ -214,8 +209,6 @@ pub fn updateWatches(
     config_path: []const u8,
     profiles_dir: []const u8,
 ) void {
-    // Remove all existing watches and re-add with potentially new paths
-    // (profile dir may change on reload due to profile_mode change)
     self.watcher.removeWatchByPath(config_path);
     self.watcher.removeWatchByPath(profiles_dir);
     self.watcher.removeWatchByPath(config_mod.user_profiles_dir);
@@ -273,74 +266,96 @@ fn drainNetlink(self: *Self, events: *EventList) void {
             const nlh: *const NlMsgHdr = @ptrCast(@alignCast(buf[offset..].ptr));
             if (nlh.nlmsg_len < @sizeOf(NlMsgHdr) or offset + nlh.nlmsg_len > bytes_read) break;
 
-            // ProcEventHeader sits at a 4-byte-aligned offset inside the
-            // netlink message (after NlMsgHdr + CnMsg = 36 bytes), but
-            // contains a u64 field requiring 8-byte alignment. Read the
-            // fields we need with readInt to avoid alignment issues.
             const what_offset = offset + @sizeOf(NlMsgHdr) + @sizeOf(CnMsg);
             const event_data_offset = what_offset + @sizeOf(ProcEventHeader);
 
             if (what_offset + @sizeOf(ProcEventHeader) <= bytes_read) {
                 const what = std.mem.readInt(u32, buf[what_offset..][0..4], .little);
-                // process_tgid is the second u32 in both ExecProcEvent and ExitProcEvent
-                const tgid_offset = event_data_offset + @sizeOf(u32);
-
-                if (what == PROC_EVENT_FORK) {
-                    // Fork event: parent_pid, parent_tgid, child_pid, child_tgid
-                    // Only track forks from PIDs we're already tracking — ignore the rest
-                    // to avoid flooding the event list (forks fire for every process system-wide)
-                    if (self.tracked_pids) |pids| {
-                        const child_tgid_off = event_data_offset + 3 * @sizeOf(u32);
-                        if (child_tgid_off + @sizeOf(u32) <= bytes_read) {
-                            const parent_tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
-                            const child_tgid = std.mem.readInt(u32, buf[child_tgid_off..][0..4], .little);
-                            // Skip thread creations (child_tgid == parent_tgid)
-                            if (child_tgid != parent_tgid) {
-                                if (pids.get(parent_tgid)) |profile_idx| {
-                                    // Only count new PIDs — duplicate events inflate the count
-                                    const is_new = !pids.contains(child_tgid);
-                                    pids.put(child_tgid, profile_idx) catch {};
-                                    if (is_new) {
-                                        if (self.profile_pid_counts) |counts| {
-                                            counts[profile_idx] +|= 1;
-                                        }
-                                        events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else if (what == PROC_EVENT_EXEC) {
-                    if (tgid_offset + @sizeOf(u32) <= bytes_read) {
-                        const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
-                        // Always forward exec for real user processes, even if
-                        // the PID is already tracked. Proton/Wine commonly
-                        // fork a child, we pre-track it on PROC_EVENT_FORK,
-                        // and that child later execs into the actual game.
-                        // Dropping exec for tracked PIDs prevents the daemon
-                        // from rematching Proton -> specific .exe profiles.
-                        if (tgid > 2) {
-                            events.append(.{ .proc_exec = tgid }) catch {};
-                        }
-                    }
-                } else if (what == PROC_EVENT_EXIT) {
-                    if (tgid_offset + @sizeOf(u32) <= bytes_read) {
-                        const pid = std.mem.readInt(u32, buf[event_data_offset..][0..4], .little);
-                        const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
-                        // Only handle thread group leader exits (whole process),
-                        // not individual thread exits — thread exits report the
-                        // leader's tgid which would incorrectly remove the game
-                        // process from tracking.
-                        if (pid == tgid) {
-                            events.append(.{ .proc_exit = tgid }) catch {};
-                        }
-                    }
-                }
+                self.handleProcEvent(events, what, event_data_offset, bytes_read, &buf);
             }
 
-            // Advance to next netlink message (NLMSG_ALIGN)
             offset += (nlh.nlmsg_len + 3) & ~@as(usize, 3);
         }
+    }
+}
+
+fn handleProcEvent(
+    self: *Self,
+    events: *EventList,
+    what: u32,
+    event_data_offset: usize,
+    bytes_read: usize,
+    buf: []const u8,
+) void {
+    switch (what) {
+        PROC_EVENT_FORK => self.handleForkProcEvent(events, event_data_offset, bytes_read, buf),
+        PROC_EVENT_EXEC => self.handleExecProcEvent(events, event_data_offset, bytes_read, buf),
+        PROC_EVENT_EXIT => self.handleExitProcEvent(events, event_data_offset, bytes_read, buf),
+        else => {},
+    }
+}
+
+fn handleForkProcEvent(
+    self: *Self,
+    events: *EventList,
+    event_data_offset: usize,
+    bytes_read: usize,
+    buf: []const u8,
+) void {
+    const parent_tgid_offset = event_data_offset + @sizeOf(u32);
+    const child_tgid_offset = event_data_offset + 3 * @sizeOf(u32);
+    if (child_tgid_offset + @sizeOf(u32) > bytes_read) return;
+
+    if (self.tracked_pids) |pids| {
+        const parent_tgid = std.mem.readInt(u32, buf[parent_tgid_offset..][0..4], .little);
+        const child_tgid = std.mem.readInt(u32, buf[child_tgid_offset..][0..4], .little);
+        if (child_tgid == parent_tgid) return;
+
+        if (pids.get(parent_tgid)) |profile_idx| {
+            const is_new = !pids.contains(child_tgid);
+            pids.put(child_tgid, profile_idx) catch return;
+            if (is_new) {
+                if (self.profile_pid_counts) |counts| {
+                    counts[profile_idx] +|= 1;
+                }
+                events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
+            }
+        }
+    }
+}
+
+fn handleExecProcEvent(
+    self: *Self,
+    events: *EventList,
+    event_data_offset: usize,
+    bytes_read: usize,
+    buf: []const u8,
+) void {
+    _ = self;
+    const tgid_offset = event_data_offset + @sizeOf(u32);
+    if (tgid_offset + @sizeOf(u32) > bytes_read) return;
+
+    const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
+    if (tgid > 2) {
+        events.append(.{ .proc_exec = tgid }) catch {};
+    }
+}
+
+fn handleExitProcEvent(
+    self: *Self,
+    events: *EventList,
+    event_data_offset: usize,
+    bytes_read: usize,
+    buf: []const u8,
+) void {
+    _ = self;
+    const tgid_offset = event_data_offset + @sizeOf(u32);
+    if (tgid_offset + @sizeOf(u32) > bytes_read) return;
+
+    const pid = std.mem.readInt(u32, buf[event_data_offset..][0..4], .little);
+    const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
+    if (pid == tgid) {
+        events.append(.{ .proc_exit = tgid }) catch {};
     }
 }
 

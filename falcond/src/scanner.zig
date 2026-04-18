@@ -2,6 +2,11 @@ const std = @import("std");
 const linux = std.os.linux;
 const posix = std.posix;
 const log = std.log.scoped(.scanner);
+const proton_parent_comm_needles = [_][]const u8{
+    "wine",
+    "reaper",
+    "umu-run",
+};
 
 // ---------------------------------------------------------------------------
 // PID digit detection
@@ -12,7 +17,7 @@ const Vec = @Vector(v_size, u8);
 
 fn isAllDigits(name: [*]const u8, len: usize) bool {
     if (len == 0 or len > v_size) return false;
-    var buf: [v_size]u8 = @splat('0'); // pad with valid digit
+    var buf: [v_size]u8 = @splat('0');
     @memcpy(buf[0..len], name[0..len]);
     const v: Vec = buf;
     const ge_0 = v >= @as(Vec, @splat('0'));
@@ -37,10 +42,7 @@ fn parsePid(name: [*]const u8, len: usize) u32 {
 // getProcessComm — read /proc/{pid}/comm (kernel-cached, max 16 bytes)
 // ---------------------------------------------------------------------------
 
-/// Fast process name from the kernel's task_struct via raw syscalls.
-/// 3 syscalls (openat + read + close) with no Zig std wrappers.
 pub fn getProcessComm(pid: u32) ?[16]u8 {
-    // Build null-terminated relative path "PID/comm\0" for openat
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/comm", .{pid}) catch return null;
     const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
@@ -49,13 +51,10 @@ pub fn getProcessComm(pid: u32) ?[16]u8 {
     var buf: [16]u8 = .{0} ** 16;
     const n = posix.read(fd, &buf) catch return null;
     if (n == 0 or n > 16) return null;
-    // Strip trailing newline
     if (buf[@intCast(n - 1)] == '\n') buf[@intCast(n - 1)] = 0;
     return buf;
 }
 
-/// Cached fd for /proc, opened once at startup. Used by getProcessComm
-/// for openat() to avoid full path resolution on every call.
 var proc_dir_fd: posix.fd_t = 0;
 
 pub fn initProcFd() void {
@@ -128,19 +127,15 @@ pub fn getProcessName(allocator: std.mem.Allocator, pid: u32) ?[]const u8 {
 // scanProcesses — enumerate running processes from /proc
 // ---------------------------------------------------------------------------
 
-/// Enumerate running processes from /proc. Values are heap-allocated strings —
-/// use an arena allocator to avoid needing to free them individually.
 pub fn scanProcesses(allocator: std.mem.Allocator) !std.AutoHashMap(u32, []const u8) {
     var pids = std.AutoHashMap(u32, []const u8).init(allocator);
 
-    // Reuse cached proc_dir_fd; seek to start for a fresh directory read
     _ = posix.system.lseek(proc_dir_fd, 0, posix.SEEK.SET);
 
     var buffer: [8192]u8 = undefined;
     while (true) {
         const rc = linux.syscall3(.getdents64, @as(usize, @intCast(proc_dir_fd)), @intFromPtr(&buffer), buffer.len);
 
-        // syscall returns usize; errors are encoded as high values (> maxInt - 4096)
         if (rc > std.math.maxInt(usize) - 4096) return error.ReadDirError;
         if (rc == 0) break;
         const nread = rc;
@@ -171,7 +166,6 @@ pub fn scanProcesses(allocator: std.mem.Allocator) !std.AutoHashMap(u32, []const
 pub fn isExe(name: []const u8) bool {
     if (name.len < 4) return false;
     const suffix: *const [4]u8 = @ptrCast(name.ptr + name.len - 4);
-    // OR 0x20 lowercases ASCII letters; '.' (0x2E) is unaffected
     const lower = [4]u8{
         suffix[0] | 0x20,
         suffix[1] | 0x20,
@@ -189,59 +183,47 @@ pub fn isExe(name: []const u8) bool {
 pub fn isProtonParent(pid: u32) !bool {
     var current_pid = pid;
 
-    // Walk up to 10 parent levels
     for (0..10) |_| {
         if (current_pid <= 1) return false;
-
-        // Open /proc/{pid}/status via openat on cached proc_dir_fd
-        var path_buf: [32]u8 = undefined;
-        const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/status", .{current_pid}) catch return false;
-        const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return false;
-
-        var content_buf: [1024]u8 = undefined;
-        const n = posix.read(fd, &content_buf) catch {
-            _ = posix.system.close(fd);
-            return false;
-        };
-        _ = posix.system.close(fd);
-
-        if (n == 0 or n > content_buf.len) return false;
-        const content = content_buf[0..@intCast(n)];
-
-        const ppid_line = std.mem.indexOf(u8, content, "PPid:") orelse return false;
-        const line_end = std.mem.indexOfScalarPos(u8, content, ppid_line, '\n') orelse content.len;
-        const ppid_start = ppid_line + 5; // Length of "PPid:"
-        const ppid_str = std.mem.trim(u8, content[ppid_start..line_end], " \t");
-
-        const ppid = std.fmt.parseInt(u32, ppid_str, 10) catch return false;
+        const ppid = readParentPid(current_pid) orelse return false;
         if (ppid <= 1) return false;
-
-        // Fast check: comm (kernel-cached, 15 chars) catches "wine" and "reaper"
-        if (getProcessComm(ppid)) |comm_buf| {
-            const comm = std.mem.sliceTo(&comm_buf, 0);
-
-            if (std.mem.indexOf(u8, comm, "wine") != null or
-                std.mem.indexOf(u8, comm, "reaper") != null or
-                std.mem.indexOf(u8, comm, "umu-run") != null)
-            {
-                return true;
-            }
-        }
-
-        // Slow check: cmdline catches "proton" which runs as a python script
-        // (comm would be "python3", but cmdline contains the full path with "proton")
-        if (getParentCmdlineMatch(ppid, "proton")) return true;
-
+        if (isProtonProcess(ppid)) return true;
         current_pid = ppid;
     }
 
     return false;
 }
 
-/// Read /proc/{pid}/cmdline and check for a substring match.
-/// Used as a fallback when comm is too short or the process is a script
-/// interpreter (e.g. python3 running the proton launch script).
-fn getParentCmdlineMatch(pid: u32, needle: []const u8) bool {
+fn readParentPid(pid: u32) ?u32 {
+    var path_buf: [32]u8 = undefined;
+    const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/status", .{pid}) catch return null;
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
+
+    var content_buf: [1024]u8 = undefined;
+    const n = posix.read(fd, &content_buf) catch return null;
+    if (n == 0 or n > content_buf.len) return null;
+    const content = content_buf[0..@intCast(n)];
+
+    const ppid_line = std.mem.indexOf(u8, content, "PPid:") orelse return null;
+    const line_end = std.mem.indexOfScalarPos(u8, content, ppid_line, '\n') orelse content.len;
+    const ppid_start = ppid_line + 5;
+    const ppid_str = std.mem.trim(u8, content[ppid_start..line_end], " \t");
+    return std.fmt.parseInt(u32, ppid_str, 10) catch null;
+}
+
+fn isProtonProcess(pid: u32) bool {
+    if (getProcessComm(pid)) |comm_buf| {
+        const comm = std.mem.sliceTo(&comm_buf, 0);
+        inline for (proton_parent_comm_needles) |needle| {
+            if (std.mem.indexOf(u8, comm, needle) != null) return true;
+        }
+    }
+
+    return getCmdlineSubstringMatch(pid, "proton");
+}
+
+fn getCmdlineSubstringMatch(pid: u32, needle: []const u8) bool {
     var path_buf: [32]u8 = undefined;
     const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/cmdline", .{pid}) catch return false;
     const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return false;
@@ -271,10 +253,9 @@ pub fn findUserForProcess(pid: u32) ?u32 {
 
     const uid_line = std.mem.indexOf(u8, content, "Uid:") orelse return null;
     const line_end = std.mem.indexOfScalarPos(u8, content, uid_line, '\n') orelse content.len;
-    const uid_start = uid_line + 4; // Length of "Uid:"
+    const uid_start = uid_line + 4;
     const uid_str = std.mem.trim(u8, content[uid_start..line_end], " \t");
 
-    // Format: "Uid: real effective saved fs" — we want the real UID
     var iter = std.mem.tokenizeAny(u8, uid_str, " \t");
     const real_uid_str = iter.next() orelse return null;
 
@@ -292,7 +273,6 @@ test "isAllDigits" {
     const mixed = "123ab";
     try std.testing.expect(!isAllDigits(mixed.ptr, mixed.len));
 
-    // Empty string should fail
     try std.testing.expect(!isAllDigits("".ptr, 0));
 
     const single = "7";
@@ -320,22 +300,18 @@ test "parsePid" {
 }
 
 test "isExe" {
-    // .exe files should pass
     try std.testing.expect(isExe("game.exe"));
     try std.testing.expect(isExe("C:\\Program Files\\game.exe"));
     try std.testing.expect(isExe(".exe"));
 
-    // Case-insensitive
     try std.testing.expect(isExe("game.EXE"));
     try std.testing.expect(isExe("game.Exe"));
     try std.testing.expect(isExe("game.eXe"));
 
-    // Non-.exe files should fail
     try std.testing.expect(!isExe("game.bin"));
     try std.testing.expect(!isExe("game"));
     try std.testing.expect(!isExe("exefile"));
 
-    // Edge cases
     try std.testing.expect(!isExe(""));
     try std.testing.expect(!isExe("exe"));
     try std.testing.expect(!isExe("a.ex"));
@@ -349,4 +325,9 @@ test "selectProcessNameFromCmdline prefers later windows exe over argv0" {
 test "selectProcessNameFromCmdline falls back to argv0 basename" {
     const cmdline = "/usr/bin/umu-run\x00--gameid\x001234\x00";
     try std.testing.expectEqualStrings("umu-run", selectProcessNameFromCmdline(cmdline));
+}
+
+test "basenameFromPath handles unix and windows separators" {
+    try std.testing.expectEqualStrings("Cyberpunk2077.exe", basenameFromPath("S:\\common\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe"));
+    try std.testing.expectEqualStrings("proton", basenameFromPath("/usr/bin/proton"));
 }

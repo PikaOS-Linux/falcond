@@ -54,15 +54,15 @@ const PendingRecheck = struct { pid: u32, deadline_ns: i128, retries: u8 };
 const PendingRechecks = otter_utils.BoundedArray(PendingRecheck, 32);
 const recheck_delay_ns: i128 = 100 * std.time.ns_per_ms;
 const max_rechecks: u8 = 15;
-/// Grace period for deactivation. Allows time for Wine/Proton child processes
-/// to be discovered via fork events or the next /proc scan. Fixed at 3 seconds
-/// — long enough for fork tracking + one fast-poll cycle, short enough that
-/// lingering game profiles don't annoy the user.
+/// Deactivation grace window.
 const deactivation_grace_ns: i128 = 3000 * std.time.ns_per_ms;
-/// Minimum interval between inotify-triggered reloads. Prevents feedback loops
-/// caused by watch re-registration (IN_IGNORED events) and external tools
-/// probing watched directories (e.g. falcond-gui's write permission test).
+/// Minimum interval between reload-triggering file events.
 const reload_debounce_ns: i128 = 1000 * std.time.ns_per_ms;
+const TrackAction = enum { unchanged, inserted, reassigned };
+const ReleaseReason = enum { exec, exit, scan };
+const generic_proton_child_comms = [_][]const u8{
+    "GameThread",
+};
 
 pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool) !Self {
     scanner.initProcFd();
@@ -147,7 +147,6 @@ pub fn deinit(self: *Self) void {
         self.deactivateProfile(idx);
     }
 
-    // Write final status before tearing down D-Bus connections
     self.updateStatus();
 
     if (!self.oneshot) self.event_loop.deinit();
@@ -172,11 +171,9 @@ pub fn run(self: *Self) !void {
         return;
     }
 
-    // Wire up fork tracking now that self has a stable address
     self.event_loop.tracked_pids = &self.known_pids;
     self.event_loop.profile_pid_counts = &self.profile_pid_counts;
 
-    // Initial /proc scan to catch processes already running before daemon started
     self.handleProcesses();
     self.status_dirty = true;
 
@@ -207,7 +204,7 @@ pub fn run(self: *Self) !void {
                         self.reload() catch |err| {
                             log.err("reload failed: {}", .{err});
                         };
-                        self.updateStatus(); // flush deactivated state for external watchers
+                        self.updateStatus();
                         self.handleProcesses();
                         self.last_reload_ns = now;
                         self.status_dirty = true;
@@ -222,7 +219,6 @@ pub fn run(self: *Self) !void {
                 .proc_exec => |pid| self.handleExecEvent(pid),
                 .proc_exit => |pid| self.handleExitEvent(pid),
                 .timeout => {
-                    // Only run full /proc scan at the configured interval, not during fast-poll
                     const now = nowNs();
                     const interval_ns: i128 = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
                     if (now - self.last_full_scan_ns >= interval_ns) {
@@ -248,10 +244,7 @@ pub fn run(self: *Self) !void {
 }
 
 fn handleForkEvent(self: *Self, parent: u32, child: u32) void {
-    // Child already tracked by event_loop — cancel any pending deactivation
     self.deactivation_deadline = null;
-    // Keep active_pid/active_uid pointing at a live process so stop scripts
-    // run as the correct user after the original parent exits.
     if (self.active_pid != null and self.active_pid.? == parent) {
         self.active_pid = child;
         self.active_uid = scanner.findUserForProcess(child);
@@ -261,9 +254,6 @@ fn handleForkEvent(self: *Self, parent: u32, child: u32) void {
 fn handleExecEvent(self: *Self, pid: u32) void {
     if (pid <= 2) return;
 
-    // Fast path: read /proc/pid/comm (kernel-cached, ~0 cost) and skip
-    // processes that can't possibly match any profile. Avoids the expensive
-    // cmdline read + arena alloc for the vast majority of system processes.
     const comm_buf = scanner.getProcessComm(pid) orelse return;
     const comm = std.mem.sliceTo(&comm_buf, 0);
     if (!self.shouldInspectProcess(pid, comm)) return;
@@ -274,7 +264,6 @@ fn handleExecEvent(self: *Self, pid: u32) void {
 
     const name = scanner.getProcessName(alloc, pid) orelse return;
 
-    // Wine/Proton preloaders update cmdline after exec — queue for deferred recheck
     if (isWinePreloader(name)) {
         self.queueRecheck(pid, max_rechecks);
         return;
@@ -302,8 +291,6 @@ fn processPendingRechecks(self: *Self) void {
             continue;
         }
 
-        // Entry expired — consume it (don't write back)
-
         if (self.known_pids.contains(entry.pid)) continue;
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -312,7 +299,6 @@ fn processPendingRechecks(self: *Self) void {
 
         const name = scanner.getProcessName(alloc, entry.pid) orelse continue;
 
-        // Still a preloader — re-queue if retries remain
         if (isWinePreloader(name)) {
             if (entry.retries > 0) {
                 self.queueRecheck(entry.pid, entry.retries - 1);
@@ -322,7 +308,6 @@ fn processPendingRechecks(self: *Self) void {
             continue;
         }
 
-        // Drop system .exe processes immediately
         if (self.isSystemProcess(name)) continue;
 
         log.debug("deferred recheck pid={d} name='{s}'", .{ entry.pid, name });
@@ -342,12 +327,12 @@ fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
     );
 
     if (result.matched()) {
-        log.info("matched pid={d} name='{s}' profile='{s}'", .{
-            pid, name, self.table.names[result.profile_idx].get(),
-        });
-        self.known_pids.put(pid, result.profile_idx) catch {};
-        self.profile_pid_counts[result.profile_idx] += 1;
-        self.status_dirty = true;
+        switch (self.assignTrackedPid(pid, result.profile_idx, true)) {
+            .inserted, .reassigned => log.info("matched pid={d} name='{s}' profile='{s}'", .{
+                pid, name, self.table.names[result.profile_idx].get(),
+            }),
+            .unchanged => {},
+        }
         self.activateProfile(result.profile_idx, pid);
     }
 }
@@ -356,9 +341,7 @@ fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
     const previous_idx = self.known_pids.get(pid);
 
     if (self.isSystemProcess(name)) {
-        if (previous_idx) |idx| {
-            self.untrackPid(pid, idx);
-        }
+        _ = self.releaseTrackedPid(pid, true, .exec);
         return;
     }
 
@@ -370,72 +353,86 @@ fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
     );
 
     if (!result.matched()) {
-        if (previous_idx) |idx| {
-            self.untrackPid(pid, idx);
-        }
+        _ = self.releaseTrackedPid(pid, true, .exec);
         return;
     }
 
-    if (previous_idx) |idx| {
-        if (idx != result.profile_idx) {
+    switch (self.assignTrackedPid(pid, result.profile_idx, true)) {
+        .unchanged => {},
+        .inserted => log.info("matched pid={d} name='{s}' profile='{s}'", .{
+            pid, name, self.table.names[result.profile_idx].get(),
+        }),
+        .reassigned => if (previous_idx) |idx| {
             log.info("rematched pid={d} name='{s}' profile='{s}' -> '{s}'", .{
                 pid,
                 name,
                 self.table.names[idx].get(),
                 self.table.names[result.profile_idx].get(),
             });
-            self.profile_pid_counts[idx] -= 1;
-            self.known_pids.put(pid, result.profile_idx) catch {};
-            self.profile_pid_counts[result.profile_idx] += 1;
-            self.status_dirty = true;
-        }
-    } else {
-        log.info("matched pid={d} name='{s}' profile='{s}'", .{
-            pid, name, self.table.names[result.profile_idx].get(),
-        });
-        self.known_pids.put(pid, result.profile_idx) catch {};
-        self.profile_pid_counts[result.profile_idx] += 1;
-        self.status_dirty = true;
+        },
     }
 
     self.activateProfile(result.profile_idx, pid);
 }
 
-fn untrackPid(self: *Self, pid: u32, profile_idx: u8) void {
-    _ = self.known_pids.remove(pid);
-    self.profile_pid_counts[profile_idx] -= 1;
-    self.status_dirty = true;
+fn assignTrackedPid(self: *Self, pid: u32, profile_idx: u8, restart_grace: bool) TrackAction {
+    const entry = self.known_pids.getOrPut(pid) catch return .unchanged;
 
-    if (self.active_profile_idx) |active_idx| {
-        if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
-            self.deactivation_deadline = nowNs() + deactivation_grace_ns;
-            log.info("last pid for '{s}' execed away, grace period started", .{
-                self.table.names[profile_idx].get(),
-            });
-        }
+    if (entry.found_existing) {
+        const previous_idx = entry.value_ptr.*;
+        if (previous_idx == profile_idx) return .unchanged;
+
+        entry.value_ptr.* = profile_idx;
+        self.profile_pid_counts[previous_idx] -= 1;
+        self.beginGraceIfProfileDrained(previous_idx, restart_grace, .exec);
+        self.profile_pid_counts[profile_idx] += 1;
+        self.status_dirty = true;
+        return .reassigned;
     }
+
+    entry.value_ptr.* = profile_idx;
+    self.profile_pid_counts[profile_idx] += 1;
+    self.status_dirty = true;
+    return .inserted;
 }
 
-fn handleExitEvent(self: *Self, pid: u32) void {
-    const profile_idx = self.known_pids.get(pid) orelse return;
-    log.debug("exit pid={d} profile='{s}'", .{ pid, self.table.names[profile_idx].get() });
+fn releaseTrackedPid(self: *Self, pid: u32, restart_grace: bool, reason: ReleaseReason) ?u8 {
+    const profile_idx = self.known_pids.get(pid) orelse return null;
     _ = self.known_pids.remove(pid);
     self.profile_pid_counts[profile_idx] -= 1;
     self.status_dirty = true;
+    self.beginGraceIfProfileDrained(profile_idx, restart_grace, reason);
+    return profile_idx;
+}
 
+fn beginGraceIfProfileDrained(self: *Self, profile_idx: u8, restart: bool, reason: ReleaseReason) void {
     if (self.active_profile_idx) |active_idx| {
-        if (active_idx == profile_idx) {
-            if (!self.hasAnyPidForProfile(profile_idx)) {
-                // Start grace period — Wine/Proton processes re-exec frequently
+        if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
+            if (restart or self.deactivation_deadline == null) {
                 self.deactivation_deadline = nowNs() + deactivation_grace_ns;
-                log.info("last pid for '{s}' exited, grace period started", .{self.table.names[profile_idx].get()});
+                log.info("last pid for '{s}' {s}, grace period started", .{
+                    self.table.names[profile_idx].get(),
+                    releaseReasonText(reason),
+                });
             }
         }
     }
 }
 
+fn releaseReasonText(reason: ReleaseReason) []const u8 {
+    return switch (reason) {
+        .exec => "execed away",
+        .exit => "exited",
+        .scan => "gone from /proc",
+    };
+}
+
+fn handleExitEvent(self: *Self, pid: u32) void {
+    const profile_idx = self.releaseTrackedPid(pid, true, .exit) orelse return;
+    log.debug("exit pid={d} profile='{s}'", .{ pid, self.table.names[profile_idx].get() });
+}
+
 fn reload(self: *Self) !void {
-    // Allocate new state before destroying old — avoids dangling on failure
     var new_config = try config_mod.load(self.allocator, config_mod.default_config_path);
     errdefer new_config.deinit();
 
@@ -452,7 +449,6 @@ fn reload(self: *Self) !void {
         self.reload_preferred_profile.len = 0;
     }
 
-    // New state ready — safe to tear down old state
     if (self.active_profile_idx) |idx| {
         self.deactivateProfile(idx);
     }
@@ -495,8 +491,6 @@ fn handleProcesses(self: *Self) void {
 
     var alive = std.AutoHashMap(u32, void).init(alloc);
 
-    // Track the best profile to activate after the scan — specific profiles
-    // take priority over the generic proton fallback.
     var best_idx: ?u8 = null;
     var best_pid: u32 = 0;
     var best_is_proton: bool = true;
@@ -529,11 +523,9 @@ fn handleProcesses(self: *Self) void {
         );
 
         if (result.matched()) {
-            self.known_pids.put(pid, result.profile_idx) catch {};
-            self.profile_pid_counts[result.profile_idx] += 1;
+            _ = self.assignTrackedPid(pid, result.profile_idx, false);
             alive.put(pid, {}) catch {};
 
-            // If no active profile, pick the best candidate to activate after scan
             if (self.active_profile_idx == null) {
                 if (shouldPreferCandidate(&self.table, best_idx, best_pid, best_is_proton, result, pid, preferred_idx)) {
                     best_idx = result.profile_idx;
@@ -546,7 +538,6 @@ fn handleProcesses(self: *Self) void {
         }
     }
 
-    // Activate deferred best match
     if (self.active_profile_idx == null) {
         if (best_idx) |idx| {
             self.activateProfile(idx, best_pid);
@@ -564,20 +555,7 @@ fn handleProcesses(self: *Self) void {
         }
 
         for (to_remove.items) |pid| {
-            const profile_idx = self.known_pids.get(pid) orelse continue;
-            _ = self.known_pids.remove(pid);
-            self.profile_pid_counts[profile_idx] -= 1;
-
-            if (self.active_profile_idx) |active_idx| {
-                if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
-                    // Use same grace period as handleExitEvent — Wine/Proton
-                    // children may not have been discovered yet.
-                    if (self.deactivation_deadline == null) {
-                        self.deactivation_deadline = nowNs() + deactivation_grace_ns;
-                        log.info("last pid for '{s}' gone from /proc, grace period started", .{self.table.names[profile_idx].get()});
-                    }
-                }
-            }
+            _ = self.releaseTrackedPid(pid, false, .scan);
         }
     }
 }
@@ -585,7 +563,6 @@ fn handleProcesses(self: *Self) void {
 fn activateProfile(self: *Self, idx: u8, pid: u32) void {
     if (self.active_profile_idx) |active| {
         if (active == idx) {
-            // Same profile — cancel any pending deactivation
             if (self.deactivation_deadline != null) {
                 self.deactivation_deadline = null;
                 log.info("deactivation cancelled — new pid={d} for '{s}'", .{ pid, self.table.names[idx].get() });
@@ -600,22 +577,12 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
             return;
         }
 
-        // Specific profiles always supersede the generic proton fallback
         const new_beats_active = (active == self.table.proton_index and idx != self.table.proton_index);
 
         if (self.deactivation_deadline != null or new_beats_active) {
             self.deactivation_deadline = null;
             self.deactivateProfile(active);
-            // Fall through to activate the new profile below
         } else {
-            if (shouldIgnoreProtonFallback(active, idx, self.table.proton_index)) {
-                log.info("ignoring queued proton fallback while specific profile '{s}' remains active", .{
-                    self.table.names[active].get(),
-                });
-                return;
-            }
-
-            // Current profile still has PIDs — queue the new one if not already queued
             for (self.queued_indices.items) |qi| {
                 if (qi == idx) return;
             }
@@ -630,7 +597,6 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
     self.active_profile_idx = idx;
     self.active_pid = pid;
 
-    // Process may exit before deactivation, so cache the UID now
     if (pid != 0) {
         self.active_uid = scanner.findUserForProcess(pid);
     }
@@ -646,7 +612,6 @@ fn activateProfile(self: *Self, idx: u8, pid: u32) void {
         act.idle_inhibit,
     });
 
-    // Snapshot current state so we can restore on deactivation
     if (self.power_profiles) |*pp| {
         if (pp.getActiveProfile()) |p| {
             self.restore_power_profile = if (std.mem.eql(u8, p, "performance"))
@@ -754,7 +719,6 @@ fn deactivateProfile(self: *Self, idx: u8) void {
     self.status_dirty = true;
 }
 
-/// Run a profile script, dropping to the process owner's session when running as root.
 fn runScript(self: *Self, script: []const u8) void {
     if (posix.system.geteuid() == 0) {
         const uid = self.active_uid orelse {
@@ -770,7 +734,6 @@ fn runScript(self: *Self, script: []const u8) void {
         const uid_str = std.fmt.allocPrint(alloc, "#{d}", .{uid}) catch return;
         const dbus_env = std.fmt.allocPrint(alloc, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{d}/bus", .{uid}) catch return;
 
-        // Use explicit argv so script content can't escape the sh -c argument
         const argv = [_][]const u8{
             "sudo",    "-u",     uid_str,
             "env",     dbus_env, "DISPLAY=:0",
@@ -834,46 +797,30 @@ fn hasAnyPidForProfile(self: *Self, profile_idx: u8) bool {
     return self.profile_pid_counts[profile_idx] > 0;
 }
 
-/// Quick check whether a /proc/pid/comm value could ever match a profile.
-/// Returns true for: wine/proton preloaders, .exe names, and names present
-/// in the profile table. Returns false for everything else (bash, foot, ls …),
-/// letting handleExecEvent skip the expensive cmdline read.
-///
-/// NOTE: /proc/pid/comm is truncated to 15 chars by the kernel, so we use
-/// prefix checks for wine and substring checks for .exe.
 fn couldMatch(self: *Self, comm: []const u8) bool {
     if (comm.len == 0) return false;
-    // Wine/Proton preloaders — prefix match because comm truncates
-    // "wine64-preloader" (16 chars) to "wine64-preloade"
     if (std.mem.startsWith(u8, comm, "wine")) return true;
-    // .exe anywhere in comm — handles truncation where suffix may shift
-    // e.g. "MyLongGame.exe" truncated still contains ".exe"
     if (std.ascii.indexOfIgnoreCase(comm, ".exe") != null) return true;
-    // Comm is 15 chars max — if it's exactly 15, the real name may be
-    // longer and could end in .exe that got truncated away
     if (comm.len >= 15) return true;
-    // Direct profile name match (hash map then case-insensitive)
     if (self.table.name_map.get(comm) != null) return true;
-    if (self.table.findByName(comm) != null) return true;
+    return self.table.findByName(comm) != null;
+}
+
+fn isGenericProtonChildComm(comm: []const u8) bool {
+    inline for (generic_proton_child_comms) |name| {
+        if (std.mem.eql(u8, comm, name)) return true;
+    }
     return false;
 }
 
 fn shouldInspectProcess(self: *Self, pid: u32, comm: []const u8) bool {
     if (self.couldMatch(comm)) return true;
-
-    // Some Proton/Wine games expose generic thread names like "GameThread"
-    // in /proc/pid/comm while cmdline still contains the actual Windows exe.
-    // If a Proton profile exists, inspect Proton-descended processes instead
-    // of dropping them at the comm fast path.
-    if (self.table.proton_index != profiles_mod.no_match) {
-        return scanner.isProtonParent(pid) catch false;
-    }
-
-    return false;
+    if (self.table.proton_index == profiles_mod.no_match) return false;
+    if (isGenericProtonChildComm(comm)) return true;
+    return scanner.isProtonParent(pid) catch false;
 }
 
 fn computeTimeout(self: *Self) u32 {
-    // Poll faster when grace period or deferred rechecks are pending
     if (self.deactivation_deadline != null or self.pending_rechecks.len > 0)
         return 200;
     return self.config.config.poll_interval_ms;
@@ -888,14 +835,12 @@ fn checkDeactivationGrace(self: *Self) void {
         return;
     };
 
-    // Check if new PIDs appeared during grace period
     if (self.hasAnyPidForProfile(idx)) {
         self.deactivation_deadline = null;
         log.info("profile '{s}' kept alive by remaining processes", .{self.table.names[idx].get()});
         return;
     }
 
-    // Pending rechecks may resolve to the game (wine preloader → game exe) — extend grace
     if (self.pending_rechecks.len > 0) {
         self.deactivation_deadline = nowNs() + deactivation_grace_ns;
         log.debug("extending grace — {d} pending rechecks", .{self.pending_rechecks.len});
@@ -906,7 +851,6 @@ fn checkDeactivationGrace(self: *Self) void {
     log.info("grace period expired, deactivating profile '{s}'", .{self.table.names[idx].get()});
     self.deactivateProfile(idx);
 
-    // Promote next queued profile
     if (self.queued_indices.items.len > 0) {
         const next = self.queued_indices.orderedRemove(0);
         if (self.findPidForProfile(next)) |next_pid| {
@@ -993,6 +937,11 @@ test "shouldIgnoreProtonFallback only blocks generic proton behind specific prof
     try std.testing.expect(!shouldIgnoreProtonFallback(3, 4, 1));
 }
 
+test "isGenericProtonChildComm matches known generic proton comm values" {
+    try std.testing.expect(isGenericProtonChildComm("GameThread"));
+    try std.testing.expect(!isGenericProtonChildComm("Cyberpunk2077.exe"));
+}
+
 test "exec rematch updates tracked pid from proton to specific profile" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
@@ -1030,4 +979,36 @@ test "exec rematch updates tracked pid from proton to specific profile" {
     try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
     try std.testing.expectEqual(@as(u16, 1), self.profile_pid_counts[game_idx]);
     try std.testing.expectEqual(@as(?u8, game_idx), self.active_profile_idx);
+}
+
+test "releaseTrackedPid starts grace when active profile drains" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    const proton_idx = try self.table.addProfile("proton");
+    try self.known_pids.put(4242, proton_idx);
+    self.profile_pid_counts[proton_idx] = 1;
+    self.active_profile_idx = proton_idx;
+
+    try std.testing.expectEqual(@as(?u8, proton_idx), self.releaseTrackedPid(4242, true, .exit));
+    try std.testing.expect(self.deactivation_deadline != null);
+    try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
 }

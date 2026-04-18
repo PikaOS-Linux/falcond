@@ -70,21 +70,17 @@ const SystemConfig = struct {
 };
 
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !LoadedConfig {
+    const created = otter_conf.ensureConfigExists(Config, allocator, path, .{}) catch |err| {
+        log.err("failed to initialize config: {s} - {}", .{ path, err });
+        return err;
+    };
+    if (created) {
+        log.warn("config file not found: {s}, wrote defaults", .{path});
+    }
+
     const result = otter_conf.loadWithMetadata(Config, allocator, path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound => {
-                log.warn("config file not found: {s}, using defaults", .{path});
-                return .{
-                    .config = Config{},
-                    .mtime_ns = 0,
-                    .allocator = allocator,
-                };
-            },
-            else => {
-                log.err("failed to load config: {s} - {}", .{ path, err });
-                return err;
-            },
-        }
+        log.err("failed to load config: {s} - {}", .{ path, err });
+        return err;
     };
 
     var config = result.config;
@@ -157,4 +153,29 @@ test "profilesDirForMode" {
     const handheld_dir = try profilesDirForMode(std.testing.allocator, base, .handheld);
     defer std.testing.allocator.free(handheld_dir);
     try std.testing.expectEqualStrings("/usr/share/falcond/profiles/handheld", handheld_dir);
+}
+
+test "load creates missing config with defaults" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const rel_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}/{s}", .{
+        ".zig-cache",
+        "tmp",
+        &tmp.sub_path,
+    });
+    defer std.testing.allocator.free(rel_dir);
+    const rel_dir_z = try std.testing.allocator.dupeZ(u8, rel_dir);
+    defer std.testing.allocator.free(rel_dir_z);
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_dir = std.mem.sliceTo(std.c.realpath(rel_dir_z, &real_buf) orelse return error.RealPathFailed, 0);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/config.conf", .{abs_dir});
+    defer std.testing.allocator.free(path);
+
+    var loaded = try load(std.testing.allocator, path);
+    defer loaded.deinit();
+
+    try std.Io.Dir.accessAbsolute(io_global(), path, .{});
+    try std.testing.expectEqual(ProfileMode.none, loaded.config.profile_mode);
+    try std.testing.expectEqual(true, loaded.config.enable_performance_mode);
 }
