@@ -74,8 +74,39 @@ pub fn deinitProcFd() void {
 }
 
 // ---------------------------------------------------------------------------
-// getProcessName — read /proc/{pid}/cmdline and extract basename
+// getProcessName — read /proc/{pid}/cmdline and extract best executable name
 // ---------------------------------------------------------------------------
+
+fn basenameFromPath(path: []const u8) []const u8 {
+    const last_unix = std.mem.lastIndexOfScalar(u8, path, '/');
+    const last_windows = std.mem.lastIndexOfScalar(u8, path, '\\');
+    const last_sep: ?usize = if (last_unix != null and last_windows != null)
+        @max(last_unix.?, last_windows.?)
+    else
+        last_unix orelse last_windows;
+
+    return if (last_sep) |sep|
+        path[sep + 1 ..]
+    else
+        path;
+}
+
+fn selectProcessNameFromCmdline(cmdline_buf: []const u8) []const u8 {
+    var fallback: []const u8 = "";
+    var it = std.mem.splitScalar(u8, cmdline_buf, 0);
+    while (it.next()) |arg| {
+        if (arg.len == 0) continue;
+        const base = basenameFromPath(arg);
+        if (base.len == 0) continue;
+        if (fallback.len == 0) {
+            fallback = base;
+        }
+        if (isExe(base)) {
+            return base;
+        }
+    }
+    return fallback;
+}
 
 pub fn getProcessName(allocator: std.mem.Allocator, pid: u32) ?[]const u8 {
     var path_buf: [32]u8 = undefined;
@@ -87,23 +118,10 @@ pub fn getProcessName(allocator: std.mem.Allocator, pid: u32) ?[]const u8 {
     const bytes = posix.read(fd, &buffer) catch return null;
     if (bytes == 0 or bytes > buffer.len) return null;
 
-    const end = std.mem.indexOfScalar(u8, buffer[0..bytes], 0) orelse bytes;
-    const cmdline = buffer[0..end];
+    const name = selectProcessNameFromCmdline(buffer[0..bytes]);
+    if (name.len == 0) return null;
 
-    // Handle both Unix and Windows path separators (Wine/Proton)
-    const last_unix = std.mem.lastIndexOfScalar(u8, cmdline, '/');
-    const last_windows = std.mem.lastIndexOfScalar(u8, cmdline, '\\');
-    const last_sep: ?usize = if (last_unix != null and last_windows != null)
-        @max(last_unix.?, last_windows.?)
-    else
-        last_unix orelse last_windows;
-
-    const exe_name = if (last_sep) |sep|
-        cmdline[sep + 1 ..]
-    else
-        cmdline;
-
-    return allocator.dupe(u8, exe_name) catch null;
+    return allocator.dupe(u8, name) catch null;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,4 +339,14 @@ test "isExe" {
     try std.testing.expect(!isExe(""));
     try std.testing.expect(!isExe("exe"));
     try std.testing.expect(!isExe("a.ex"));
+}
+
+test "selectProcessNameFromCmdline prefers later windows exe over argv0" {
+    const cmdline = "/usr/bin/wine64\x00C:\\Program Files\\Cyberpunk 2077\\bin\\x64\\Cyberpunk2077.exe\x00--fullscreen\x00";
+    try std.testing.expectEqualStrings("Cyberpunk2077.exe", selectProcessNameFromCmdline(cmdline));
+}
+
+test "selectProcessNameFromCmdline falls back to argv0 basename" {
+    const cmdline = "/usr/bin/umu-run\x00--gameid\x001234\x00";
+    try std.testing.expectEqualStrings("umu-run", selectProcessNameFromCmdline(cmdline));
 }

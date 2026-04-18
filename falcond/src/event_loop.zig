@@ -111,7 +111,7 @@ pub fn init(
 ) !Self {
     // 1. epoll
     const epoll_raw = posix.system.epoll_create1(linux.EPOLL.CLOEXEC);
-    if (epoll_raw > std.math.maxInt(i32)) return error.EpollCreateFailed;
+    if (epoll_raw < 0) return error.EpollCreateFailed;
     const epoll_fd: posix.fd_t = @intCast(epoll_raw);
     errdefer _ = posix.system.close(epoll_fd);
 
@@ -176,7 +176,7 @@ pub fn wait(self: *Self, timeout_ms: u32) EventList {
 
     var events = EventList{};
 
-    if (n > std.math.maxInt(i32)) {
+    if (n < 0) {
         // Error or signal interruption — return empty, loop will retry
         return events;
     }
@@ -237,7 +237,7 @@ fn drainSignals(self: *Self, events: *EventList) void {
     while (true) {
         var buf: [@sizeOf(linux.signalfd_siginfo)]u8 align(@alignOf(linux.signalfd_siginfo)) = undefined;
         const n = posix.system.read(self.signal_fd, &buf, buf.len);
-        if (n != @sizeOf(linux.signalfd_siginfo)) break;
+        if (n < 0 or n != @sizeOf(linux.signalfd_siginfo)) break;
         const info: *const linux.signalfd_siginfo = @ptrCast(&buf);
         const event: ?Event = if (info.signo == @intFromEnum(linux.SIG.TERM) or info.signo == @intFromEnum(linux.SIG.INT))
             .signal_term
@@ -265,7 +265,7 @@ fn drainNetlink(self: *Self, events: *EventList) void {
 
     while (true) {
         const n = posix.system.read(fd, &buf, buf.len);
-        if (n == 0 or n > buf.len) break;
+        if (n <= 0 or n > buf.len) break;
         const bytes_read: usize = @intCast(n);
 
         var offset: usize = 0;
@@ -313,8 +313,13 @@ fn drainNetlink(self: *Self, events: *EventList) void {
                 } else if (what == PROC_EVENT_EXEC) {
                     if (tgid_offset + @sizeOf(u32) <= bytes_read) {
                         const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
-                        // Skip init/kthreadd and already-tracked PIDs
-                        if (tgid > 2 and (self.tracked_pids == null or !self.tracked_pids.?.contains(tgid))) {
+                        // Always forward exec for real user processes, even if
+                        // the PID is already tracked. Proton/Wine commonly
+                        // fork a child, we pre-track it on PROC_EVENT_FORK,
+                        // and that child later execs into the actual game.
+                        // Dropping exec for tracked PIDs prevents the daemon
+                        // from rematching Proton -> specific .exe profiles.
+                        if (tgid > 2) {
                             events.append(.{ .proc_exec = tgid }) catch {};
                         }
                     }
@@ -347,7 +352,7 @@ fn epollAdd(epoll_fd: posix.fd_t, fd: posix.fd_t, tag: FdTag) void {
         .data = .{ .u32 = @intFromEnum(tag) },
     };
     const rc = posix.system.epoll_ctl(epoll_fd, linux.EPOLL.CTL_ADD, fd, &ev);
-    if (rc > std.math.maxInt(i32)) {
+    if (rc != 0) {
         log.warn("epoll_ctl add failed for fd {}", .{fd});
     }
 }
@@ -356,7 +361,7 @@ fn epollAdd(epoll_fd: posix.fd_t, fd: posix.fd_t, tag: FdTag) void {
 
 fn initNetlink(epoll_fd: posix.fd_t) ?posix.fd_t {
     const fd_raw = posix.system.socket(posix.AF.NETLINK, posix.SOCK.DGRAM | posix.SOCK.NONBLOCK | posix.SOCK.CLOEXEC, NETLINK_CONNECTOR);
-    if (fd_raw > std.math.maxInt(i32)) {
+    if (fd_raw < 0) {
         log.info("netlink proc connector unavailable (socket failed), falling back to poll-only mode", .{});
         return null;
     }
@@ -368,7 +373,7 @@ fn initNetlink(epoll_fd: posix.fd_t) ?posix.fd_t {
     };
 
     const bind_rc = posix.system.bind(fd, @ptrCast(&addr), @sizeOf(SockaddrNl));
-    if (bind_rc > std.math.maxInt(i32)) {
+    if (bind_rc != 0) {
         log.info("netlink proc connector unavailable (bind failed), falling back to poll-only mode", .{});
         _ = posix.system.close(fd);
         return null;

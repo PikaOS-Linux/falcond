@@ -62,9 +62,8 @@ fn writeStatusFile(
     inhibitor: *const Inhibitor,
 ) !void {
     var content_buf: std.ArrayList(u8) = .empty;
-    defer content_buf.deinit(std.heap.page_allocator);
     var allocating_writer: std.Io.Writer.Allocating = .fromArrayList(std.heap.page_allocator, &content_buf);
-    defer content_buf = allocating_writer.toArrayList();
+    errdefer allocating_writer.deinit();
     const w = &allocating_writer.writer;
 
     // ── FEATURES ────────────────────────────────────────────────────────
@@ -180,6 +179,8 @@ fn writeStatusFile(
         try w.writeAll("\n");
     }
 
+    content_buf = allocating_writer.toArrayList();
+    defer content_buf.deinit(std.heap.page_allocator);
     const content = content_buf.items;
 
     // Write to permanent status file

@@ -260,14 +260,13 @@ fn handleForkEvent(self: *Self, parent: u32, child: u32) void {
 
 fn handleExecEvent(self: *Self, pid: u32) void {
     if (pid <= 2) return;
-    if (self.known_pids.contains(pid)) return;
 
     // Fast path: read /proc/pid/comm (kernel-cached, ~0 cost) and skip
     // processes that can't possibly match any profile. Avoids the expensive
     // cmdline read + arena alloc for the vast majority of system processes.
     const comm_buf = scanner.getProcessComm(pid) orelse return;
     const comm = std.mem.sliceTo(&comm_buf, 0);
-    if (!self.couldMatch(comm)) return;
+    if (!self.shouldInspectProcess(pid, comm)) return;
 
     var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
@@ -281,7 +280,7 @@ fn handleExecEvent(self: *Self, pid: u32) void {
         return;
     }
 
-    self.matchAndActivate(pid, name);
+    self.matchAndActivateExec(pid, name);
 }
 
 fn isWinePreloader(name: []const u8) bool {
@@ -350,6 +349,70 @@ fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
         self.profile_pid_counts[result.profile_idx] += 1;
         self.status_dirty = true;
         self.activateProfile(result.profile_idx, pid);
+    }
+}
+
+fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
+    const previous_idx = self.known_pids.get(pid);
+
+    if (self.isSystemProcess(name)) {
+        if (previous_idx) |idx| {
+            self.untrackPid(pid, idx);
+        }
+        return;
+    }
+
+    const result = matcher_mod.matchProcess(
+        &self.table,
+        self.config.config,
+        pid,
+        name,
+    );
+
+    if (!result.matched()) {
+        if (previous_idx) |idx| {
+            self.untrackPid(pid, idx);
+        }
+        return;
+    }
+
+    if (previous_idx) |idx| {
+        if (idx != result.profile_idx) {
+            log.info("rematched pid={d} name='{s}' profile='{s}' -> '{s}'", .{
+                pid,
+                name,
+                self.table.names[idx].get(),
+                self.table.names[result.profile_idx].get(),
+            });
+            self.profile_pid_counts[idx] -= 1;
+            self.known_pids.put(pid, result.profile_idx) catch {};
+            self.profile_pid_counts[result.profile_idx] += 1;
+            self.status_dirty = true;
+        }
+    } else {
+        log.info("matched pid={d} name='{s}' profile='{s}'", .{
+            pid, name, self.table.names[result.profile_idx].get(),
+        });
+        self.known_pids.put(pid, result.profile_idx) catch {};
+        self.profile_pid_counts[result.profile_idx] += 1;
+        self.status_dirty = true;
+    }
+
+    self.activateProfile(result.profile_idx, pid);
+}
+
+fn untrackPid(self: *Self, pid: u32, profile_idx: u8) void {
+    _ = self.known_pids.remove(pid);
+    self.profile_pid_counts[profile_idx] -= 1;
+    self.status_dirty = true;
+
+    if (self.active_profile_idx) |active_idx| {
+        if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
+            self.deactivation_deadline = nowNs() + deactivation_grace_ns;
+            log.info("last pid for '{s}' execed away, grace period started", .{
+                self.table.names[profile_idx].get(),
+            });
+        }
     }
 }
 
@@ -454,7 +517,7 @@ fn handleProcesses(self: *Self) void {
 
         const comm_buf = scanner.getProcessComm(pid) orelse continue;
         const comm = std.mem.sliceTo(&comm_buf, 0);
-        if (!self.couldMatch(comm)) continue;
+        if (!self.shouldInspectProcess(pid, comm)) continue;
 
         if (self.isSystemProcess(name)) continue;
 
@@ -795,6 +858,20 @@ fn couldMatch(self: *Self, comm: []const u8) bool {
     return false;
 }
 
+fn shouldInspectProcess(self: *Self, pid: u32, comm: []const u8) bool {
+    if (self.couldMatch(comm)) return true;
+
+    // Some Proton/Wine games expose generic thread names like "GameThread"
+    // in /proc/pid/comm while cmdline still contains the actual Windows exe.
+    // If a Proton profile exists, inspect Proton-descended processes instead
+    // of dropping them at the comm fast path.
+    if (self.table.proton_index != profiles_mod.no_match) {
+        return scanner.isProtonParent(pid) catch false;
+    }
+
+    return false;
+}
+
 fn computeTimeout(self: *Self) u32 {
     // Poll faster when grace period or deferred rechecks are pending
     if (self.deactivation_deadline != null or self.pending_rechecks.len > 0)
@@ -914,4 +991,43 @@ test "shouldIgnoreProtonFallback only blocks generic proton behind specific prof
     try std.testing.expect(shouldIgnoreProtonFallback(3, 1, 1));
     try std.testing.expect(!shouldIgnoreProtonFallback(1, 1, 1));
     try std.testing.expect(!shouldIgnoreProtonFallback(3, 4, 1));
+}
+
+test "exec rematch updates tracked pid from proton to specific profile" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    const proton_idx = try self.table.addProfile("proton");
+    const game_idx = try self.table.addProfile("Cyberpunk2077.exe");
+    self.table.proton_index = proton_idx;
+
+    try self.known_pids.put(4242, proton_idx);
+    self.profile_pid_counts[proton_idx] = 1;
+    self.active_profile_idx = proton_idx;
+    self.active_pid = 4242;
+
+    self.matchAndActivateExec(4242, "Cyberpunk2077.exe");
+
+    try std.testing.expectEqual(@as(?u8, game_idx), self.known_pids.get(4242));
+    try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
+    try std.testing.expectEqual(@as(u16, 1), self.profile_pid_counts[game_idx]);
+    try std.testing.expectEqual(@as(?u8, game_idx), self.active_profile_idx);
 }
