@@ -15,9 +15,8 @@ const ProfileTable = profiles_mod.ProfileTable;
 const scanner = @import("scanner.zig");
 const matcher_mod = @import("matcher.zig");
 const MatchResult = matcher_mod.MatchResult;
-const status = @import("status.zig");
-const vcache = @import("vcache.zig");
 const EventLoop = @import("event_loop.zig");
+const daemon_actions = @import("daemon_actions.zig");
 
 const log = std.log.scoped(.daemon);
 const posix = std.posix;
@@ -54,9 +53,7 @@ const PendingRecheck = struct { pid: u32, deadline_ns: i128, retries: u8 };
 const PendingRechecks = otter_utils.BoundedArray(PendingRecheck, 32);
 const recheck_delay_ns: i128 = 100 * std.time.ns_per_ms;
 const max_rechecks: u8 = 15;
-/// Deactivation grace window.
 const deactivation_grace_ns: i128 = 3000 * std.time.ns_per_ms;
-/// Minimum interval between reload-triggering file events.
 const reload_debounce_ns: i128 = 1000 * std.time.ns_per_ms;
 const TrackAction = enum { unchanged, inserted, reassigned };
 const ReleaseReason = enum { exec, exit, scan };
@@ -125,7 +122,7 @@ pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool
     };
 
     if (loaded.config.vcache_mode.toSysfsValue()) |val| {
-        vcache.write(val) catch |err| {
+        @import("vcache.zig").write(val) catch |err| {
             log.warn("failed to set global vcache mode: {}", .{err});
         };
     }
@@ -138,16 +135,16 @@ pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool
         }
     }
 
-    self.updateStatus();
+    daemon_actions.updateStatus(self);
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     if (self.active_profile_idx) |idx| {
-        self.deactivateProfile(idx);
+        daemon_actions.deactivateProfile(self, idx);
     }
 
-    self.updateStatus();
+    daemon_actions.updateStatus(self);
 
     if (!self.oneshot) self.event_loop.deinit();
     self.inhibitor.deinit();
@@ -192,7 +189,7 @@ pub fn run(self: *Self) !void {
                     self.reload() catch |err| {
                         log.err("reload failed: {}", .{err});
                     };
-                    self.updateStatus();
+                    daemon_actions.updateStatus(self);
                     self.handleProcesses();
                     self.last_reload_ns = nowNs();
                     self.status_dirty = true;
@@ -204,7 +201,7 @@ pub fn run(self: *Self) !void {
                         self.reload() catch |err| {
                             log.err("reload failed: {}", .{err});
                         };
-                        self.updateStatus();
+                        daemon_actions.updateStatus(self);
                         self.handleProcesses();
                         self.last_reload_ns = now;
                         self.status_dirty = true;
@@ -220,7 +217,7 @@ pub fn run(self: *Self) !void {
                 .proc_exit => |pid| self.handleExitEvent(pid),
                 .timeout => {
                     const now = nowNs();
-                    const interval_ns: i128 = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
+                    const interval_ns = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
                     if (now - self.last_full_scan_ns >= interval_ns) {
                         self.handleProcesses();
                         self.status_dirty = true;
@@ -234,10 +231,11 @@ pub fn run(self: *Self) !void {
             self.processPendingRechecks();
         }
 
+        self.ensureActiveProfileGrace();
         self.checkDeactivationGrace();
 
         if (self.status_dirty) {
-            self.updateStatus();
+            daemon_actions.updateStatus(self);
             self.status_dirty = false;
         }
     }
@@ -245,6 +243,7 @@ pub fn run(self: *Self) !void {
 
 fn handleForkEvent(self: *Self, parent: u32, child: u32) void {
     self.deactivation_deadline = null;
+    self.queueRecheck(child, max_rechecks);
     if (self.active_pid != null and self.active_pid.? == parent) {
         self.active_pid = child;
         self.active_uid = scanner.findUserForProcess(child);
@@ -333,7 +332,7 @@ fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
             }),
             .unchanged => {},
         }
-        self.activateProfile(result.profile_idx, pid);
+        daemon_actions.activateProfile(self, result.profile_idx, pid);
     }
 }
 
@@ -372,7 +371,7 @@ fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
         },
     }
 
-    self.activateProfile(result.profile_idx, pid);
+    daemon_actions.activateProfile(self, result.profile_idx, pid);
 }
 
 fn assignTrackedPid(self: *Self, pid: u32, profile_idx: u8, restart_grace: bool) TrackAction {
@@ -432,6 +431,17 @@ fn handleExitEvent(self: *Self, pid: u32) void {
     log.debug("exit pid={d} profile='{s}'", .{ pid, self.table.names[profile_idx].get() });
 }
 
+fn ensureActiveProfileGrace(self: *Self) void {
+    const idx = self.active_profile_idx orelse return;
+    if (self.hasAnyPidForProfile(idx)) return;
+    if (self.deactivation_deadline != null) return;
+
+    self.deactivation_deadline = nowNs() + deactivation_grace_ns;
+    log.info("active profile '{s}' has no tracked pids, grace period started", .{
+        self.table.names[idx].get(),
+    });
+}
+
 fn reload(self: *Self) !void {
     var new_config = try config_mod.load(self.allocator, config_mod.default_config_path);
     errdefer new_config.deinit();
@@ -450,7 +460,7 @@ fn reload(self: *Self) !void {
     }
 
     if (self.active_profile_idx) |idx| {
-        self.deactivateProfile(idx);
+        daemon_actions.deactivateProfile(self, idx);
     }
     self.active_profile_idx = null;
     self.deactivation_deadline = null;
@@ -504,7 +514,7 @@ fn handleProcesses(self: *Self) void {
         const pid = entry.key_ptr.*;
         const name = entry.value_ptr.*;
 
-        if (self.known_pids.contains(pid)) {
+        if (self.reconcileTrackedPidScan(pid, name)) {
             alive.put(pid, {}) catch {};
             continue;
         }
@@ -533,14 +543,14 @@ fn handleProcesses(self: *Self) void {
                     best_is_proton = result.is_proton;
                 }
             } else {
-                self.activateProfile(result.profile_idx, pid);
+                daemon_actions.activateProfile(self, result.profile_idx, pid);
             }
         }
     }
 
     if (self.active_profile_idx == null) {
         if (best_idx) |idx| {
-            self.activateProfile(idx, best_pid);
+            daemon_actions.activateProfile(self, idx, best_pid);
         }
     }
     self.reload_preferred_profile.len = 0;
@@ -560,190 +570,43 @@ fn handleProcesses(self: *Self) void {
     }
 }
 
-fn activateProfile(self: *Self, idx: u8, pid: u32) void {
-    if (self.active_profile_idx) |active| {
-        if (active == idx) {
-            if (self.deactivation_deadline != null) {
-                self.deactivation_deadline = null;
-                log.info("deactivation cancelled — new pid={d} for '{s}'", .{ pid, self.table.names[idx].get() });
-            }
-            return;
-        }
+fn reconcileTrackedPidScan(self: *Self, pid: u32, name: []const u8) bool {
+    const tracked_idx = self.known_pids.get(pid) orelse return false;
 
-        if (shouldIgnoreProtonFallback(active, idx, self.table.proton_index)) {
-            log.info("ignoring proton fallback while specific profile '{s}' is active", .{
-                self.table.names[active].get(),
-            });
-            return;
-        }
-
-        const new_beats_active = (active == self.table.proton_index and idx != self.table.proton_index);
-
-        if (self.deactivation_deadline != null or new_beats_active) {
-            self.deactivation_deadline = null;
-            self.deactivateProfile(active);
-        } else {
-            for (self.queued_indices.items) |qi| {
-                if (qi == idx) return;
-            }
-            self.queued_indices.append(self.allocator, idx) catch {
-                log.warn("queue full, dropping profile '{s}'", .{self.table.names[idx].get()});
-            };
-            log.info("queued profile '{s}'", .{self.table.names[idx].get()});
-            return;
-        }
+    if (self.isSystemProcess(name)) {
+        _ = self.releaseTrackedPid(pid, false, .scan);
+        return false;
     }
 
-    self.active_profile_idx = idx;
-    self.active_pid = pid;
-
-    if (pid != 0) {
-        self.active_uid = scanner.findUserForProcess(pid);
-    }
-
-    const act = &self.table.activation[idx];
-    const name = self.table.names[idx].get();
-    log.info("activating profile '{s}' (scx={s}, mode={s}, perf={}, vcache={s}, inhibit={})", .{
+    const result = matcher_mod.matchProcess(
+        &self.table,
+        self.config.config,
+        pid,
         name,
-        @tagName(act.scx_sched),
-        @tagName(act.scx_sched_props),
-        act.performance_mode,
-        @tagName(act.vcache_mode),
-        act.idle_inhibit,
-    });
+    );
 
-    if (self.power_profiles) |*pp| {
-        if (pp.getActiveProfile()) |p| {
-            self.restore_power_profile = if (std.mem.eql(u8, p, "performance"))
-                "performance"
-            else if (std.mem.eql(u8, p, "power-saver"))
-                "power-saver"
-            else
-                "balanced";
-        }
-    }
-    if (self.scx_loader) |*scx| {
-        if (scx.getCurrentScheduler()) |sched| {
-            self.restore_sched = sched.toScxName();
-        }
-        self.restore_mode = @tagName(scx.getSchedulerMode());
-    }
-    self.restore_vcache = vcache.read();
-
-    if (act.performance_mode) {
-        if (self.power_profiles) |*pp| {
-            pp.setActiveProfile("performance") catch |err| {
-                log.warn("failed to set performance profile: {}", .{err});
-            };
-        }
+    if (!result.matched()) {
+        _ = self.releaseTrackedPid(pid, false, .scan);
+        return false;
     }
 
-    if (act.scx_sched != .none) {
-        if (self.scx_loader) |*scx| {
-            scx.switchScheduler(act.scx_sched, act.scx_sched_props) catch |err| {
-                log.warn("failed to switch scx scheduler: {}", .{err});
-            };
-        }
+    switch (self.assignTrackedPid(pid, result.profile_idx, false)) {
+        .unchanged => {},
+        .inserted => unreachable,
+        .reassigned => log.info("scan rematched pid={d} name='{s}' profile='{s}' -> '{s}'", .{
+            pid,
+            name,
+            self.table.names[tracked_idx].get(),
+            self.table.names[result.profile_idx].get(),
+        }),
     }
 
-    if (act.vcache_mode.toSysfsValue()) |val| {
-        vcache.write(val) catch |err| {
-            log.warn("failed to set vcache mode: {}", .{err});
-        };
+    if (self.active_profile_idx == null) {
+        return true;
     }
 
-    if (act.idle_inhibit) {
-        self.inhibitor.inhibit("falcond", "Game profile active", pid);
-    }
-
-    if (!act.start_script.isEmpty()) {
-        self.runScript(act.start_script.get());
-    }
-
-    self.status_dirty = true;
-}
-
-fn deactivateProfile(self: *Self, idx: u8) void {
-    const act = &self.table.activation[idx];
-    const name = self.table.names[idx].get();
-    log.info("deactivating profile '{s}'", .{name});
-
-    if (self.restore_power_profile) |profile| {
-        if (self.power_profiles) |*pp| {
-            pp.setActiveProfile(profile) catch |err| {
-                log.warn("failed to restore power profile: {}", .{err});
-            };
-        }
-        self.restore_power_profile = null;
-    }
-
-    if (self.restore_sched) |sched_name| {
-        if (self.scx_loader) |*scx| {
-            const restore_mode = if (self.restore_mode) |m|
-                std.meta.stringToEnum(ScxMode, m) orelse .default
-            else
-                .default;
-            const restore_sched = ScxScheduler.fromString(sched_name) catch .none;
-            if (restore_sched != .none) {
-                scx.switchScheduler(restore_sched, restore_mode) catch |err| {
-                    log.warn("failed to restore scx scheduler: {}", .{err});
-                };
-            } else {
-                scx.stopScheduler() catch |err| {
-                    log.warn("failed to stop scx scheduler: {}", .{err});
-                };
-            }
-        }
-        self.restore_sched = null;
-        self.restore_mode = null;
-    }
-
-    if (self.restore_vcache) |val| {
-        vcache.write(val) catch |err| {
-            log.warn("failed to restore vcache mode: {}", .{err});
-        };
-        self.restore_vcache = null;
-    }
-
-    if (self.inhibitor.isInhibited()) {
-        self.inhibitor.uninhibit();
-    }
-
-    if (!act.stop_script.isEmpty()) {
-        self.runScript(act.stop_script.get());
-    }
-
-    self.active_profile_idx = null;
-    self.active_pid = null;
-    self.active_uid = null;
-    self.status_dirty = true;
-}
-
-fn runScript(self: *Self, script: []const u8) void {
-    if (posix.system.geteuid() == 0) {
-        const uid = self.active_uid orelse {
-            log.warn("no saved uid, running script as root", .{});
-            otter_utils.process.spawnCommand(otter_utils.io.get(), script);
-            return;
-        };
-
-        var arena = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena.deinit();
-        const alloc = arena.allocator();
-
-        const uid_str = std.fmt.allocPrint(alloc, "#{d}", .{uid}) catch return;
-        const dbus_env = std.fmt.allocPrint(alloc, "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{d}/bus", .{uid}) catch return;
-
-        const argv = [_][]const u8{
-            "sudo",    "-u",     uid_str,
-            "env",     dbus_env, "DISPLAY=:0",
-            "/bin/sh", "-c",     script,
-        };
-
-        otter_utils.process.spawnArgv(otter_utils.io.get(), &argv);
-    } else {
-        otter_utils.process.spawnCommand(otter_utils.io.get(), script);
-    }
+    daemon_actions.activateProfile(self, result.profile_idx, pid);
+    return true;
 }
 
 fn isSystemProcess(self: *Self, name: []const u8) bool {
@@ -849,12 +712,12 @@ fn checkDeactivationGrace(self: *Self) void {
 
     self.deactivation_deadline = null;
     log.info("grace period expired, deactivating profile '{s}'", .{self.table.names[idx].get()});
-    self.deactivateProfile(idx);
+    daemon_actions.deactivateProfile(self, idx);
 
     if (self.queued_indices.items.len > 0) {
         const next = self.queued_indices.orderedRemove(0);
         if (self.findPidForProfile(next)) |next_pid| {
-            self.activateProfile(next, next_pid);
+            daemon_actions.activateProfile(self, next, next_pid);
         } else {
             log.info("queued profile '{s}' dropped — process no longer running", .{self.table.names[next].get()});
         }
@@ -869,21 +732,6 @@ fn findPidForProfile(self: *Self, profile_idx: u8) ?u32 {
         }
     }
     return null;
-}
-
-fn updateStatus(self: *Self) void {
-    status.update(
-        self.config.config,
-        &self.table,
-        self.active_profile_idx,
-        self.queued_indices.items,
-        if (self.power_profiles) |*pp| pp else null,
-        if (self.scx_loader) |*scx| scx else null,
-        self.restore_sched,
-        self.restore_mode,
-        self.restore_power_profile,
-        &self.inhibitor,
-    );
 }
 
 fn nowNs() i128 {
@@ -1011,4 +859,167 @@ test "releaseTrackedPid starts grace when active profile drains" {
     try std.testing.expectEqual(@as(?u8, proton_idx), self.releaseTrackedPid(4242, true, .exit));
     try std.testing.expect(self.deactivation_deadline != null);
     try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
+}
+
+test "handleForkEvent queues child for deferred rematch" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    self.active_pid = 111;
+
+    self.handleForkEvent(111, 222);
+
+    try std.testing.expectEqual(@as(usize, 1), self.pending_rechecks.len);
+    try std.testing.expectEqual(@as(u32, 222), self.pending_rechecks.constSlice()[0].pid);
+    try std.testing.expectEqual(@as(?u32, 222), self.active_pid);
+    try std.testing.expectEqual(@as(?u8, null), self.known_pids.get(222));
+}
+
+test "activateProfile replaces stale active profile instead of queueing" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+    defer self.queued_indices.deinit(std.testing.allocator);
+
+    const old_idx = try self.table.addProfile("OldGame.exe");
+    const new_idx = try self.table.addProfile("NewGame.exe");
+    self.active_profile_idx = old_idx;
+
+    self.activateProfile(new_idx, 777);
+
+    try std.testing.expectEqual(@as(?u8, new_idx), self.active_profile_idx);
+    try std.testing.expectEqual(@as(usize, 0), self.queued_indices.items.len);
+}
+
+test "ensureActiveProfileGrace heals stale active profile state" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    const idx = try self.table.addProfile("StaleGame.exe");
+    self.active_profile_idx = idx;
+
+    self.ensureActiveProfileGrace();
+
+    try std.testing.expect(self.deactivation_deadline != null);
+}
+
+test "reconcileTrackedPidScan drops reused pid that no longer matches" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    const idx = try self.table.addProfile("OblivionRemastered-Win64-Shipping.exe");
+    try self.known_pids.put(5555, idx);
+    self.profile_pid_counts[idx] = 1;
+    self.active_profile_idx = idx;
+
+    try std.testing.expect(!self.reconcileTrackedPidScan(5555, "bash"));
+    try std.testing.expectEqual(@as(?u8, null), self.known_pids.get(5555));
+    try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[idx]);
+    try std.testing.expect(self.deactivation_deadline != null);
+}
+
+test "reconcileTrackedPidScan rematches tracked proton pid to specific profile" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = Self{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+    defer self.table.deinit(std.testing.allocator);
+    defer self.config.deinit();
+    defer self.inhibitor.deinit();
+
+    const proton_idx = try self.table.addProfile("proton");
+    const game_idx = try self.table.addProfile("Cyberpunk2077.exe");
+    self.table.proton_index = proton_idx;
+    try self.known_pids.put(5555, proton_idx);
+    self.profile_pid_counts[proton_idx] = 1;
+    self.active_profile_idx = proton_idx;
+
+    try std.testing.expect(self.reconcileTrackedPidScan(5555, "Cyberpunk2077.exe"));
+    try std.testing.expectEqual(@as(?u8, game_idx), self.known_pids.get(5555));
+    try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
+    try std.testing.expectEqual(@as(u16, 1), self.profile_pid_counts[game_idx]);
 }

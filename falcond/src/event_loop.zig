@@ -311,15 +311,8 @@ fn handleForkProcEvent(
         const child_tgid = std.mem.readInt(u32, buf[child_tgid_offset..][0..4], .little);
         if (child_tgid == parent_tgid) return;
 
-        if (pids.get(parent_tgid)) |profile_idx| {
-            const is_new = !pids.contains(child_tgid);
-            pids.put(child_tgid, profile_idx) catch return;
-            if (is_new) {
-                if (self.profile_pid_counts) |counts| {
-                    counts[profile_idx] +|= 1;
-                }
-                events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
-            }
+        if (pids.contains(parent_tgid)) {
+            events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
         }
     }
 }
@@ -427,4 +420,61 @@ fn sendNetlinkControl(fd: posix.fd_t, mode: u32) bool {
     const buf: [*]const u8 = @ptrCast(&msg);
     const rc = posix.system.sendto(fd, buf, @sizeOf(SubscribeMsg), 0, null, 0);
     return rc == @sizeOf(SubscribeMsg);
+}
+
+test "handleForkProcEvent queues fork event without inheriting child tracking" {
+    var tracked = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer tracked.deinit();
+
+    try tracked.put(111, 3);
+
+    var counts = [_]u16{0} ** @import("profiles.zig").max_profiles;
+    counts[3] = 1;
+
+    var loop = Self{
+        .epoll_fd = undefined,
+        .signal_fd = undefined,
+        .watcher = undefined,
+        .netlink_fd = null,
+        .tracked_pids = &tracked,
+        .profile_pid_counts = &counts,
+    };
+
+    var events = EventList{};
+    var buf = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, buf[4..8], 111, .little);
+    std.mem.writeInt(u32, buf[12..16], 222, .little);
+
+    loop.handleForkProcEvent(&events, 0, buf.len, &buf);
+
+    try std.testing.expectEqual(@as(usize, 1), events.len);
+    try std.testing.expectEqual(Event{ .proc_fork = .{ .parent = 111, .child = 222 } }, events.constSlice()[0]);
+    try std.testing.expectEqual(@as(?u8, 3), tracked.get(111));
+    try std.testing.expectEqual(@as(?u8, null), tracked.get(222));
+    try std.testing.expectEqual(@as(u16, 1), counts[3]);
+}
+
+test "handleForkProcEvent ignores untracked parent" {
+    var tracked = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer tracked.deinit();
+
+    var counts = [_]u16{0} ** @import("profiles.zig").max_profiles;
+    var loop = Self{
+        .epoll_fd = undefined,
+        .signal_fd = undefined,
+        .watcher = undefined,
+        .netlink_fd = null,
+        .tracked_pids = &tracked,
+        .profile_pid_counts = &counts,
+    };
+
+    var events = EventList{};
+    var buf = [_]u8{0} ** 16;
+    std.mem.writeInt(u32, buf[4..8], 111, .little);
+    std.mem.writeInt(u32, buf[12..16], 222, .little);
+
+    loop.handleForkProcEvent(&events, 0, buf.len, &buf);
+
+    try std.testing.expectEqual(@as(usize, 0), events.len);
+    try std.testing.expectEqual(@as(?u8, null), tracked.get(222));
 }
