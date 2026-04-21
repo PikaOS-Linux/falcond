@@ -1,3 +1,9 @@
+falcond (2.0.5-101pika1) pika; urgency=medium
+
+  * fix: ensure config dir
+
+ -- ferreo <ferreo@pika-os.com>  Sun, 19 Apr 2026 11:49:00 +0100
+
 falcond (2.0.4-101pika1) pika; urgency=medium
 
   * fix: netlink related profile loading weirdness

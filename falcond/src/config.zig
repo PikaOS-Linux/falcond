@@ -5,7 +5,9 @@ const otter_utils = @import("otter_utils");
 const build_options = @import("build_options");
 pub const ScxScheduler = otter_desktop.scx_loader.ScxScheduler;
 pub const ScxMode = otter_desktop.scx_loader.ScxMode;
-inline fn io_global() std.Io { return otter_utils.io.get(); }
+inline fn io_global() std.Io {
+    return otter_utils.io.get();
+}
 
 const log = std.log.scoped(.config);
 
@@ -70,6 +72,16 @@ const SystemConfig = struct {
 };
 
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !LoadedConfig {
+    if (std.Io.Dir.path.dirname(path)) |config_dir| {
+        std.Io.Dir.createDirAbsolute(io_global(), config_dir, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => {
+                log.err("failed to create config directory {s}: {}", .{ config_dir, err });
+                return err;
+            },
+        };
+    }
+
     const created = otter_conf.ensureConfigExists(Config, allocator, path, .{}) catch |err| {
         log.err("failed to initialize config: {s} - {}", .{ path, err });
         return err;
