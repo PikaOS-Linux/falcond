@@ -21,16 +21,16 @@
     // internet connectivity.
     .dependencies = .{
         .otter_conf = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.10.2",
-            .hash = "otter_conf-1.0.0-d7vdxA1KAgBoH7Iep3g616vLN4mQqiYRKoBhnmTz4aNT",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-conf#v0.10.31",
+            .hash = "otter_conf-1.0.0-d7vdxBFKAgBYedLjAC2cgU5KWKYjNI5o2iASvZbcyYJj",
         },
         .otter_desktop = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-desktop#v0.10.0",
-            .hash = "otter_desktop-0.6.0-nwUfzferLwC-ZCkTzhA9ifLtDbzvjQCp47wkgFdiQ8gl",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-desktop#v0.10.31",
+            .hash = "otter_desktop-0.6.0-nwUfzUZOMAC90f3U3dDsvA_OVINR6xxFpKLwUQd0ZR3O",
         },
         .otter_utils = .{
-            .url = "git+https://git.pika-os.com/otter-shell/otter-utils#v0.10.0",
-            .hash = "otter_utils-0.5.0-DYWsuwukAACB2XwKLX1V3TiOSwR32unPuxTc9hQjL-sH",
+            .url = "git+https://git.pika-os.com/otter-shell/otter-utils#v0.10.31",
+            .hash = "otter_utils-0.5.0-DYWsu_-qAABTlv9a7Dia9Q5RqS6503cAUdlO-wbs8URN",
         },
     },
 
