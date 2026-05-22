@@ -112,6 +112,18 @@ pub fn activateProfile(self: anytype, idx: u8, pid: u32) void {
         self.inhibitor.inhibit("falcond", "Game profile active", pid);
     }
 
+    if (act.dmem_protect) {
+        if (self.dmem) |*dmem| {
+            dmem.activateProfile(idx);
+            var it = self.known_pids.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* == idx) {
+                    dmem.trackPid(idx, name, entry.key_ptr.*, .active);
+                }
+            }
+        }
+    }
+
     if (!act.start_script.isEmpty()) {
         runScript(self, act.start_script.get());
     }
@@ -165,6 +177,10 @@ pub fn deactivateProfile(self: anytype, idx: u8) void {
         self.inhibitor.uninhibit();
     }
 
+    if (act.dmem_protect) {
+        if (self.dmem) |*dmem| dmem.deactivateProfile(idx);
+    }
+
     if (!act.stop_script.isEmpty()) {
         runScript(self, act.stop_script.get());
     }
@@ -214,5 +230,6 @@ pub fn updateStatus(self: anytype) void {
         self.restore_mode,
         self.restore_power_profile,
         &self.inhibitor,
+        if (self.dmem) |*dmem| dmem else null,
     );
 }

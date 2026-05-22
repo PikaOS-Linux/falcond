@@ -59,6 +59,7 @@ pub const ActivationData = struct {
     start_script: FixedStr(max_script_len) = .{},
     stop_script: FixedStr(max_script_len) = .{},
     idle_inhibit: bool = false,
+    dmem_protect: bool = false,
 };
 
 // ── ProfileTable ─────────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ pub const ProfileConfig = struct {
     start_script: []const u8 = "",
     stop_script: []const u8 = "",
     idle_inhibit: bool = false,
+    dmem_protect: bool = false,
 };
 
 /// User override variant — optional fields allow partial overrides that
@@ -138,6 +140,7 @@ pub const UserProfileConfig = struct {
     start_script: ?[]const u8 = null,
     stop_script: ?[]const u8 = null,
     idle_inhibit: ?bool = null,
+    dmem_protect: ?bool = null,
 };
 
 // ── loadProfiles ─────────────────────────────────────────────────────────────
@@ -178,6 +181,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, table: *ProfileTable, dir_path
         act.scx_sched_props = cfg.scx_sched_props;
         act.vcache_mode = cfg.vcache_mode;
         act.idle_inhibit = cfg.idle_inhibit;
+        act.dmem_protect = cfg.dmem_protect;
 
         if (cfg.start_script.len > 0) {
             act.start_script.set(cfg.start_script);
@@ -243,6 +247,7 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
             if (cfg.scx_sched_props) |v| act.scx_sched_props = v;
             if (cfg.vcache_mode) |v| act.vcache_mode = v;
             if (cfg.idle_inhibit) |v| act.idle_inhibit = v;
+            if (cfg.dmem_protect) |v| act.dmem_protect = v;
             if (cfg.start_script) |v| {
                 if (v.len > 0) act.start_script.set(v);
             }
@@ -256,6 +261,7 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
             act.scx_sched_props = cfg.scx_sched_props orelse .default;
             act.vcache_mode = cfg.vcache_mode orelse .cache;
             act.idle_inhibit = cfg.idle_inhibit orelse false;
+            act.dmem_protect = cfg.dmem_protect orelse false;
             if (cfg.start_script) |v| {
                 if (v.len > 0) act.start_script.set(v);
             }
@@ -333,4 +339,35 @@ test "ActivationData defaults match old Profile defaults" {
     try std.testing.expectEqual(ScxMode.default, act.scx_sched_props);
     try std.testing.expectEqual(VCacheMode.cache, act.vcache_mode);
     try std.testing.expectEqual(false, act.idle_inhibit);
+    try std.testing.expectEqual(false, act.dmem_protect);
+}
+
+test "ProfileConfig can enable dmem_protect" {
+    const cfg = ProfileConfig{ .name = "Game.exe", .dmem_protect = true };
+    var act = ActivationData{};
+
+    act.dmem_protect = cfg.dmem_protect;
+
+    try std.testing.expectEqual(true, act.dmem_protect);
+}
+
+test "UserProfileConfig dmem_protect only overrides when present" {
+    const absent = UserProfileConfig{ .name = "Game.exe" };
+    const present = UserProfileConfig{ .name = "Game.exe", .dmem_protect = false };
+    var act = ActivationData{ .dmem_protect = true };
+
+    if (absent.dmem_protect) |v| act.dmem_protect = v;
+    try std.testing.expectEqual(true, act.dmem_protect);
+
+    if (present.dmem_protect) |v| act.dmem_protect = v;
+    try std.testing.expectEqual(false, act.dmem_protect);
+}
+
+test "new user profile dmem_protect defaults false" {
+    const cfg = UserProfileConfig{ .name = "Game.exe" };
+    var act = ActivationData{};
+
+    act.dmem_protect = cfg.dmem_protect orelse false;
+
+    try std.testing.expectEqual(false, act.dmem_protect);
 }

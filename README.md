@@ -9,6 +9,7 @@ falcond is a powerful system daemon designed to automatically optimize your Linu
 - **Performance Mode**: Enables system-wide performance optimizations when gaming
 - **3D vcache Management**: Smart management of AMD 3D vcache settings
 - **SCX Scheduler Integration**: Dynamically pick a scheduler that is best for the specific game
+- **DMEM Cgroup Protection**: Optional GPU/device-memory protection for active profiles on supported kernels
 - **Proton Compatibility**: Full support for Steam Proton games, with a global profile for excellent game coverage
 - **Low Overhead**: Minimal system resource usage
 - **Different Device Modes**: Profiles for desktops, handhelds, HTPC etc
@@ -78,6 +79,7 @@ scx_sched_props = gaming
 vcache_mode = cache
 start_script = "/home/ferreo/start.sh"
 stop_script = "notify-send 'game stopped'"
+dmem_protect = true
 ```
 
 ### Available Options
@@ -90,6 +92,9 @@ stop_script = "notify-send 'game stopped'"
 - `start_script`: Script to run when the game starts
 - `stop_script`: Script to run when the game stops
 - `idle_inhibit`: Prevent screensaver/idle while game is running (default: false)
+- `dmem_protect`: Move matched profile processes into a falcond-managed child cgroup and protect their GPU/device memory with `dmem.low` while active (default: false)
+
+`dmem_protect` requires cgroup v2, a kernel with `CONFIG_CGROUP_DMEM`, a compatible GPU driver, and a hierarchy where the dmem controller can be enabled for the game cgroup. Current systems may require `dmemcg-booster` or equivalent hierarchy preparation. The feature is optional and profiles still activate when dmem is unavailable.
 
 ## Service Management
 
@@ -115,6 +120,17 @@ Example output:
 ```
 FEATURES:
   Performance Mode: Available
+  DMEM Cgroup: Available
+
+DMEM:
+  Regions:
+    drm/0000:03:00.0/vram0 8514437120
+  Active Protection: cs2
+  Protected Cgroups:
+    /sys/fs/cgroup/.../falcond-dmem-p00-cs2
+  Holding Cgroups:
+    /sys/fs/cgroup/.../falcond-dmem-other
+  Last Error: None
 
 CONFIG:
   Profile Mode: none
@@ -217,6 +233,7 @@ These should be feature detected by falcond so if not present that specific feat
 power-profiles-daemon or tuned + tuned-ppd
 scx-sched
 Linux kernel patched with AMD 3D vcache support
+Linux kernel with CONFIG_CGROUP_DMEM and dmem-capable GPU driver for dmem_protect
 dbus and sudo
 
 ## Packaging

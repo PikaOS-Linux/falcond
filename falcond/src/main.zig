@@ -130,4 +130,7 @@ test {
     _ = @import("status.zig");
     _ = @import("inhibitor.zig");
     _ = @import("event_loop.zig");
+    _ = @import("dmemcg.zig");
+    _ = @import("dmemcg/capacity.zig");
+    _ = @import("dmemcg/path.zig");
 }

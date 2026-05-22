@@ -17,6 +17,9 @@ const matcher_mod = @import("matcher.zig");
 const MatchResult = matcher_mod.MatchResult;
 const EventLoop = @import("event_loop.zig");
 const daemon_actions = @import("daemon_actions.zig");
+const daemon_dmem = @import("daemon_dmem.zig");
+const daemon_time = @import("daemon_time.zig");
+const dmemcg = @import("dmemcg.zig");
 
 const log = std.log.scoped(.daemon);
 const posix = std.posix;
@@ -36,6 +39,7 @@ profile_pid_counts: [profiles_mod.max_profiles]u16 = .{0} ** profiles_mod.max_pr
 power_profiles: ?PowerProfiles = null,
 scx_loader: ?ScxLoader = null,
 inhibitor: Inhibitor,
+dmem: ?dmemcg.Manager = null,
 restore_sched: ?[]const u8 = null,
 restore_mode: ?[]const u8 = null,
 restore_vcache: ?[]const u8 = null,
@@ -116,6 +120,7 @@ pub fn init(allocator: std.mem.Allocator, config_path: []const u8, oneshot: bool
         .power_profiles = power_profiles,
         .scx_loader = scx_loader,
         .inhibitor = Inhibitor.init(allocator),
+        .dmem = dmemcg.Manager.init(allocator),
         .profiles_dir = profiles_dir,
         .event_loop = event_loop,
         .oneshot = oneshot,
@@ -147,6 +152,7 @@ pub fn deinit(self: *Self) void {
     daemon_actions.updateStatus(self);
 
     if (!self.oneshot) self.event_loop.deinit();
+    if (self.dmem) |*dmem| dmem.deinit();
     self.inhibitor.deinit();
     if (self.scx_loader) |*scx| {
         scx.deinit();
@@ -191,11 +197,11 @@ pub fn run(self: *Self) !void {
                     };
                     daemon_actions.updateStatus(self);
                     self.handleProcesses();
-                    self.last_reload_ns = nowNs();
+                    self.last_reload_ns = daemon_time.nowNs();
                     self.status_dirty = true;
                 },
                 .config_changed => {
-                    const now = nowNs();
+                    const now = daemon_time.nowNs();
                     if (now - self.last_reload_ns >= reload_debounce_ns) {
                         log.info("config or profiles changed, reloading", .{});
                         self.reload() catch |err| {
@@ -216,7 +222,7 @@ pub fn run(self: *Self) !void {
                 .proc_exec => |pid| self.handleExecEvent(pid),
                 .proc_exit => |pid| self.handleExitEvent(pid),
                 .timeout => {
-                    const now = nowNs();
+                    const now = daemon_time.nowNs();
                     const interval_ns = @as(i128, self.config.config.poll_interval_ms) * std.time.ns_per_ms;
                     if (now - self.last_full_scan_ns >= interval_ns) {
                         self.handleProcesses();
@@ -276,12 +282,12 @@ fn isWinePreloader(name: []const u8) bool {
 }
 
 fn queueRecheck(self: *Self, pid: u32, retries: u8) void {
-    const deadline = nowNs() + recheck_delay_ns;
+    const deadline = daemon_time.nowNs() + recheck_delay_ns;
     self.pending_rechecks.append(.{ .pid = pid, .deadline_ns = deadline, .retries = retries }) catch {};
 }
 
 fn processPendingRechecks(self: *Self) void {
-    const now = nowNs();
+    const now = daemon_time.nowNs();
     var write: usize = 0;
     for (self.pending_rechecks.constSlice()) |entry| {
         if (now < entry.deadline_ns) {
@@ -381,22 +387,26 @@ fn assignTrackedPid(self: *Self, pid: u32, profile_idx: u8, restart_grace: bool)
         const previous_idx = entry.value_ptr.*;
         if (previous_idx == profile_idx) return .unchanged;
 
+        daemon_dmem.releasePid(self, previous_idx, pid);
         entry.value_ptr.* = profile_idx;
         self.profile_pid_counts[previous_idx] -= 1;
         self.beginGraceIfProfileDrained(previous_idx, restart_grace, .exec);
         self.profile_pid_counts[profile_idx] += 1;
+        daemon_dmem.trackPid(self, profile_idx, pid);
         self.status_dirty = true;
         return .reassigned;
     }
 
     entry.value_ptr.* = profile_idx;
     self.profile_pid_counts[profile_idx] += 1;
+    daemon_dmem.trackPid(self, profile_idx, pid);
     self.status_dirty = true;
     return .inserted;
 }
 
 fn releaseTrackedPid(self: *Self, pid: u32, restart_grace: bool, reason: ReleaseReason) ?u8 {
     const profile_idx = self.known_pids.get(pid) orelse return null;
+    daemon_dmem.releasePid(self, profile_idx, pid);
     _ = self.known_pids.remove(pid);
     self.profile_pid_counts[profile_idx] -= 1;
     self.status_dirty = true;
@@ -408,7 +418,7 @@ fn beginGraceIfProfileDrained(self: *Self, profile_idx: u8, restart: bool, reaso
     if (self.active_profile_idx) |active_idx| {
         if (active_idx == profile_idx and !self.hasAnyPidForProfile(profile_idx)) {
             if (restart or self.deactivation_deadline == null) {
-                self.deactivation_deadline = nowNs() + deactivation_grace_ns;
+                self.deactivation_deadline = daemon_time.nowNs() + deactivation_grace_ns;
                 log.info("last pid for '{s}' {s}, grace period started", .{
                     self.table.names[profile_idx].get(),
                     releaseReasonText(reason),
@@ -436,7 +446,7 @@ fn ensureActiveProfileGrace(self: *Self) void {
     if (self.hasAnyPidForProfile(idx)) return;
     if (self.deactivation_deadline != null) return;
 
-    self.deactivation_deadline = nowNs() + deactivation_grace_ns;
+    self.deactivation_deadline = daemon_time.nowNs() + deactivation_grace_ns;
     log.info("active profile '{s}' has no tracked pids, grace period started", .{
         self.table.names[idx].get(),
     });
@@ -466,6 +476,7 @@ fn reload(self: *Self) !void {
     self.deactivation_deadline = null;
     self.pending_rechecks = .{};
     self.queued_indices.clearRetainingCapacity();
+    if (self.dmem) |*dmem| dmem.reset();
     self.known_pids.clearRetainingCapacity();
     self.profile_pid_counts = .{0} ** profiles_mod.max_profiles;
 
@@ -568,6 +579,8 @@ fn handleProcesses(self: *Self) void {
             _ = self.releaseTrackedPid(pid, false, .scan);
         }
     }
+
+    if (self.dmem) |*dmem| dmem.reconcile();
 }
 
 fn reconcileTrackedPidScan(self: *Self, pid: u32, name: []const u8) bool {
@@ -691,7 +704,7 @@ fn computeTimeout(self: *Self) u32 {
 
 fn checkDeactivationGrace(self: *Self) void {
     const deadline = self.deactivation_deadline orelse return;
-    if (nowNs() < deadline) return;
+    if (daemon_time.nowNs() < deadline) return;
 
     const idx = self.active_profile_idx orelse {
         self.deactivation_deadline = null;
@@ -705,7 +718,7 @@ fn checkDeactivationGrace(self: *Self) void {
     }
 
     if (self.pending_rechecks.len > 0) {
-        self.deactivation_deadline = nowNs() + deactivation_grace_ns;
+        self.deactivation_deadline = daemon_time.nowNs() + deactivation_grace_ns;
         log.debug("extending grace — {d} pending rechecks", .{self.pending_rechecks.len});
         return;
     }
@@ -734,12 +747,29 @@ fn findPidForProfile(self: *Self, profile_idx: u8) ?u32 {
     return null;
 }
 
-fn nowNs() i128 {
-    var ts: posix.timespec = undefined;
-    if (posix.system.clock_gettime(posix.CLOCK.MONOTONIC, &ts) != 0) {
-        return 0;
-    }
-    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+fn initTestDaemon(map: std.AutoHashMap(u32, u8)) Self {
+    return .{
+        .allocator = std.testing.allocator,
+        .config = .{
+            .config = .{},
+            .mtime_ns = 0,
+            .allocator = std.testing.allocator,
+        },
+        .table = ProfileTable.init(),
+        .known_pids = map,
+        .inhibitor = Inhibitor.init(std.testing.allocator),
+        .profiles_dir = "",
+        .event_loop = undefined,
+        .oneshot = true,
+    };
+}
+
+fn deinitTestDaemon(self: *Self) void {
+    self.known_pids.deinit();
+    self.table.deinit(std.testing.allocator);
+    self.config.deinit();
+    self.inhibitor.deinit();
+    self.queued_indices.deinit(std.testing.allocator);
 }
 
 test "shouldPreferCandidate prefers specific profile over proton fallback" {
@@ -794,26 +824,12 @@ test "exec rematch updates tracked pid from proton to specific profile" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const proton_idx = try self.table.addProfile("proton");
     const game_idx = try self.table.addProfile("Cyberpunk2077.exe");
+    self.table.activation[game_idx].vcache_mode = .none;
     self.table.proton_index = proton_idx;
 
     try self.known_pids.put(4242, proton_idx);
@@ -833,23 +849,8 @@ test "releaseTrackedPid starts grace when active profile drains" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const proton_idx = try self.table.addProfile("proton");
     try self.known_pids.put(4242, proton_idx);
@@ -865,23 +866,8 @@ test "handleForkEvent queues child for deferred rematch" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     self.active_pid = 111;
 
@@ -897,30 +883,15 @@ test "activateProfile replaces stale active profile instead of queueing" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
-    defer self.queued_indices.deinit(std.testing.allocator);
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const old_idx = try self.table.addProfile("OldGame.exe");
     const new_idx = try self.table.addProfile("NewGame.exe");
+    self.table.activation[new_idx].vcache_mode = .none;
     self.active_profile_idx = old_idx;
 
-    self.activateProfile(new_idx, 777);
+    daemon_actions.activateProfile(&self, new_idx, 777);
 
     try std.testing.expectEqual(@as(?u8, new_idx), self.active_profile_idx);
     try std.testing.expectEqual(@as(usize, 0), self.queued_indices.items.len);
@@ -930,23 +901,8 @@ test "ensureActiveProfileGrace heals stale active profile state" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const idx = try self.table.addProfile("StaleGame.exe");
     self.active_profile_idx = idx;
@@ -960,23 +916,8 @@ test "reconcileTrackedPidScan drops reused pid that no longer matches" {
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const idx = try self.table.addProfile("OblivionRemastered-Win64-Shipping.exe");
     try self.known_pids.put(5555, idx);
@@ -993,26 +934,12 @@ test "reconcileTrackedPidScan rematches tracked proton pid to specific profile" 
     var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer map.deinit();
 
-    var self = Self{
-        .allocator = std.testing.allocator,
-        .config = .{
-            .config = .{},
-            .mtime_ns = 0,
-            .allocator = std.testing.allocator,
-        },
-        .table = ProfileTable.init(),
-        .known_pids = map,
-        .inhibitor = Inhibitor.init(std.testing.allocator),
-        .profiles_dir = "",
-        .event_loop = undefined,
-        .oneshot = true,
-    };
-    defer self.table.deinit(std.testing.allocator);
-    defer self.config.deinit();
-    defer self.inhibitor.deinit();
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
 
     const proton_idx = try self.table.addProfile("proton");
     const game_idx = try self.table.addProfile("Cyberpunk2077.exe");
+    self.table.activation[game_idx].vcache_mode = .none;
     self.table.proton_index = proton_idx;
     try self.known_pids.put(5555, proton_idx);
     self.profile_pid_counts[proton_idx] = 1;

@@ -6,6 +6,7 @@ const PowerProfiles = otter_desktop.PowerProfiles;
 const ScxLoader = otter_desktop.scx_loader.ScxLoader;
 const Config = @import("config.zig").Config;
 const Inhibitor = @import("inhibitor.zig");
+const dmemcg = @import("dmemcg.zig");
 const vcache = @import("vcache.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.status);
@@ -30,6 +31,7 @@ pub fn update(
     restore_mode: ?[]const u8,
     restore_power_profile: ?[:0]const u8,
     inhibitor: *const Inhibitor,
+    dmem: ?*const dmemcg.Manager,
 ) void {
     writeStatusFile(
         config,
@@ -42,6 +44,7 @@ pub fn update(
         restore_mode,
         restore_power_profile,
         inhibitor,
+        dmem,
     ) catch |err| {
         log.err("failed to write status file: {}", .{err});
     };
@@ -60,6 +63,7 @@ fn writeStatusFile(
     restore_mode: ?[]const u8,
     restore_power_profile: ?[:0]const u8,
     inhibitor: *const Inhibitor,
+    dmem: ?*const dmemcg.Manager,
 ) !void {
     var content_buf: std.ArrayList(u8) = .empty;
     var allocating_writer: std.Io.Writer.Allocating = .fromArrayList(std.heap.page_allocator, &content_buf);
@@ -71,7 +75,10 @@ fn writeStatusFile(
     try w.print("  Performance Mode: {s}\n", .{
         if (power_profiles != null) "Available" else "Unavailable",
     });
+    try w.print("  DMEM Cgroup: {s}\n", .{dmemFeatureText(dmem)});
     try w.writeAll("\n");
+
+    try writeDmemStatus(w, dmem, table, active_profile_idx);
 
     // ── CONFIG ──────────────────────────────────────────────────────────
     try w.writeAll("CONFIG:\n");
@@ -201,6 +208,89 @@ fn writeStatusFile(
         defer tmp_file.close(io_global());
         try tmp_file.writeStreamingAll(io_global(), content);
     }
+}
+
+fn dmemFeatureText(dmem: ?*const dmemcg.Manager) []const u8 {
+    const manager = dmem orelse return "Unavailable";
+    return switch (manager.availability) {
+        .available => if (manager.last_error == null) "Available" else "Partially Available",
+        else => "Unavailable",
+    };
+}
+
+fn writeDmemStatus(w: *std.Io.Writer, dmem: ?*const dmemcg.Manager, table: *const ProfileTable, active_profile_idx: ?u8) !void {
+    try w.writeAll("DMEM:\n");
+    const manager = dmem orelse {
+        try w.writeAll("  Reason: dmem manager not initialized\n\n");
+        return;
+    };
+
+    if (manager.availability != .available) {
+        try w.print("  Reason: {s}\n\n", .{availabilityText(manager.availability)});
+        return;
+    }
+
+    try w.writeAll("  Regions:\n");
+    if (manager.regions.len == 0) {
+        try w.writeAll("    (None)\n");
+    } else {
+        for (manager.regions) |region| {
+            try w.print("    {s} {d}\n", .{ region.name, region.capacity });
+        }
+    }
+
+    try w.writeAll("  Active Protection: ");
+    if (active_profile_idx) |idx| {
+        const act = table.activation[idx];
+        if (act.dmem_protect) {
+            try w.print("{s}\n", .{table.names[idx].get()});
+        } else {
+            try w.writeAll("None\n");
+        }
+    } else {
+        try w.writeAll("None\n");
+    }
+
+    try w.writeAll("  Protected Cgroups:\n");
+    var protected_count: usize = 0;
+    var pcg_it = manager.profile_cgroups.iterator();
+    while (pcg_it.next()) |entry| {
+        protected_count += 1;
+        try w.print("    {s}\n", .{entry.value_ptr.child_path});
+    }
+    if (protected_count == 0) try w.writeAll("    (None)\n");
+
+    try w.writeAll("  Holding Cgroups:\n");
+    var holding_count: usize = 0;
+    var parent_it = manager.parent_records.iterator();
+    while (parent_it.next()) |entry| {
+        holding_count += 1;
+        try w.print("    {s}\n", .{entry.value_ptr.other_child_path});
+    }
+    if (holding_count == 0) try w.writeAll("    (None)\n");
+
+    if (manager.last_error) |err| {
+        try w.print("  Last Error: {s}\n", .{availabilityText(err)});
+        if (err == .hierarchy_not_enabled) {
+            try w.writeAll("  Hint: install/enable dmemcg-booster or equivalent hierarchy preparation\n");
+        }
+    } else {
+        try w.writeAll("  Last Error: None\n");
+    }
+    try w.writeAll("\n");
+}
+
+fn availabilityText(availability: dmemcg.Availability) []const u8 {
+    return switch (availability) {
+        .available => "available",
+        .no_cgroup_v2 => "cgroup v2 is not available",
+        .no_dmem_controller => "dmem controller is not available",
+        .no_capacity_file => "/sys/fs/cgroup/dmem.capacity not found",
+        .no_regions => "no valid dmem capacity regions",
+        .hierarchy_not_enabled => "dmem exists, but the source cgroup hierarchy does not expose dmem to the game scope",
+        .cannot_prepare_parent => "could not prepare parent cgroup for dmem",
+        .permission_denied => "permission denied while accessing dmem cgroup files",
+    };
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
