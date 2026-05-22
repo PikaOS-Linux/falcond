@@ -275,7 +275,7 @@ pub const Manager = struct {
         }
 
         if (self.availability == .available) {
-                try movePidToChild(self.allocator, pid, record.child_path);
+            try movePidToChild(self.allocator, pid, record.child_path);
         }
 
         self.writeLow(record, state);
@@ -471,7 +471,14 @@ fn readPidCgroupPath(allocator: std.mem.Allocator, pid: u32) ![]const u8 {
 }
 
 fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    return try std.Io.Dir.cwd().readFileAlloc(ioGlobal(), path, allocator, .limited(max_file_size));
+    const io = ioGlobal();
+    const file = try std.Io.Dir.openFileAbsolute(io, path, .{});
+    defer file.close(io);
+
+    const buf = try allocator.alloc(u8, max_file_size);
+    errdefer allocator.free(buf);
+    const len = try file.readPositionalAll(io, buf, 0);
+    return try allocator.realloc(buf, len);
 }
 
 fn containsController(allocator: std.mem.Allocator, path: []const u8, controller: []const u8) !bool {
@@ -642,4 +649,32 @@ test "moveInternalParentPids propagates cgroup.procs read failure" {
         1,
         100,
     ));
+}
+
+test "readFileAlloc reads absolute paths" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const rel_dir = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}/{s}", .{
+        ".zig-cache",
+        "tmp",
+        &tmp.sub_path,
+    });
+    defer std.testing.allocator.free(rel_dir);
+    const rel_dir_z = try std.testing.allocator.dupeZ(u8, rel_dir);
+    defer std.testing.allocator.free(rel_dir_z);
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const abs_dir = std.mem.sliceTo(std.c.realpath(rel_dir_z, &real_buf) orelse return error.RealPathFailed, 0);
+    const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/controllers", .{abs_dir});
+    defer std.testing.allocator.free(path);
+
+    {
+        const file = try std.Io.Dir.createFileAbsolute(ioGlobal(), path, .{});
+        defer file.close(ioGlobal());
+        try file.writeStreamingAll(ioGlobal(), "cpu dmem\n");
+    }
+
+    const bytes = try readFileAlloc(std.testing.allocator, path);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("cpu dmem\n", bytes);
 }
