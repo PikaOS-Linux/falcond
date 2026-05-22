@@ -1,4 +1,4 @@
-falcond (2.0.7-101pika1) pika; urgency=medium
+falcond (2.0.8-101pika1) pika; urgency=medium
 
   * feat: Add dmem cgroup profile protection
 
