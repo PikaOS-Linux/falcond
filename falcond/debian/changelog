@@ -1,3 +1,9 @@
+falcond (2.0.9-101pika1) pika; urgency=medium
+
+  * chore: bump otter-shell libraries to v0.11.25
+
+ -- ferreo <ferreo@pika-os.com>  Thu, 25 Jun 2026 18:58:09 +0100
+
 falcond (2.0.8-101pika1) pika; urgency=medium
 
   * feat: Add dmem cgroup profile protection
