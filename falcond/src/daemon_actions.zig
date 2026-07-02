@@ -193,11 +193,11 @@ pub fn deactivateProfile(self: anytype, idx: u8) void {
 
 fn runScript(self: anytype, script: []const u8) void {
     if (posix.system.geteuid() == 0) {
-        const uid = self.active_uid orelse {
-            log.warn("no saved uid, running script as root", .{});
-            otter_utils.process.spawnCommand(otter_utils.io.get(), script);
+        if (!canRunScriptFromRoot(self.active_uid)) {
+            log.warn("no saved uid, skipping profile script", .{});
             return;
-        };
+        }
+        const uid = self.active_uid.?;
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -216,6 +216,15 @@ fn runScript(self: anytype, script: []const u8) void {
     } else {
         otter_utils.process.spawnCommand(otter_utils.io.get(), script);
     }
+}
+
+test "root script execution requires target uid" {
+    try std.testing.expect(canRunScriptFromRoot(1000));
+    try std.testing.expect(!canRunScriptFromRoot(null));
+}
+
+fn canRunScriptFromRoot(uid: ?u32) bool {
+    return uid != null;
 }
 
 pub fn updateStatus(self: anytype) void {
