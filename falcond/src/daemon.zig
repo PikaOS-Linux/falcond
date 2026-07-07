@@ -61,6 +61,7 @@ const deactivation_grace_ns: i128 = 3000 * std.time.ns_per_ms;
 const reload_debounce_ns: i128 = 1000 * std.time.ns_per_ms;
 const TrackAction = enum { unchanged, inserted, reassigned };
 const ReleaseReason = enum { exec, exit, scan };
+const ProcessMatch = struct { result: MatchResult, name: []const u8 };
 const generic_proton_child_comms = [_][]const u8{
     "GameThread",
 };
@@ -274,7 +275,7 @@ fn handleExecEvent(self: *Self, pid: u32) void {
         return;
     }
 
-    self.matchAndActivateExec(pid, name);
+    self.matchAndActivateExec(pid, name, comm);
 }
 
 fn isWinePreloader(name: []const u8) bool {
@@ -324,17 +325,13 @@ fn processPendingRechecks(self: *Self) void {
 fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
     if (self.isSystemProcess(name)) return;
 
-    const result = matcher_mod.matchProcess(
-        &self.table,
-        self.config.config,
-        pid,
-        name,
-    );
+    const matched = self.matchProcessByNameOrComm(pid, name, "");
+    const result = matched.result;
 
     if (result.matched()) {
         switch (self.assignTrackedPid(pid, result.profile_idx, true)) {
             .inserted, .reassigned => log.info("matched pid={d} name='{s}' profile='{s}'", .{
-                pid, name, self.table.names[result.profile_idx].get(),
+                pid, matched.name, self.table.names[result.profile_idx].get(),
             }),
             .unchanged => {},
         }
@@ -342,20 +339,16 @@ fn matchAndActivate(self: *Self, pid: u32, name: []const u8) void {
     }
 }
 
-fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
+fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8, comm: []const u8) void {
     const previous_idx = self.known_pids.get(pid);
 
-    if (self.isSystemProcess(name)) {
+    if (self.isSystemProcess(name) or self.isSystemProcess(comm)) {
         _ = self.releaseTrackedPid(pid, true, .exec);
         return;
     }
 
-    const result = matcher_mod.matchProcess(
-        &self.table,
-        self.config.config,
-        pid,
-        name,
-    );
+    const matched = self.matchProcessByNameOrComm(pid, name, comm);
+    const result = matched.result;
 
     if (!result.matched()) {
         _ = self.releaseTrackedPid(pid, true, .exec);
@@ -365,12 +358,12 @@ fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
     switch (self.assignTrackedPid(pid, result.profile_idx, true)) {
         .unchanged => {},
         .inserted => log.info("matched pid={d} name='{s}' profile='{s}'", .{
-            pid, name, self.table.names[result.profile_idx].get(),
+            pid, matched.name, self.table.names[result.profile_idx].get(),
         }),
         .reassigned => if (previous_idx) |idx| {
             log.info("rematched pid={d} name='{s}' profile='{s}' -> '{s}'", .{
                 pid,
-                name,
+                matched.name,
                 self.table.names[idx].get(),
                 self.table.names[result.profile_idx].get(),
             });
@@ -378,6 +371,16 @@ fn matchAndActivateExec(self: *Self, pid: u32, name: []const u8) void {
     }
 
     daemon_actions.activateProfile(self, result.profile_idx, pid);
+}
+
+fn matchProcessByNameOrComm(self: *Self, pid: u32, name: []const u8, comm: []const u8) ProcessMatch {
+    const by_name = matcher_mod.matchProcess(&self.table, self.config.config, pid, name);
+    if (by_name.matched()) return .{ .result = by_name, .name = name };
+    if (comm.len == 0 or std.mem.eql(u8, comm, name)) return .{ .result = by_name, .name = name };
+
+    const by_comm = matcher_mod.matchProcess(&self.table, self.config.config, pid, comm);
+    if (by_comm.matched()) return .{ .result = by_comm, .name = comm };
+    return .{ .result = by_name, .name = name };
 }
 
 fn assignTrackedPid(self: *Self, pid: u32, profile_idx: u8, restart_grace: bool) TrackAction {
@@ -536,12 +539,7 @@ fn handleProcesses(self: *Self) void {
 
         if (self.isSystemProcess(name)) continue;
 
-        const result = matcher_mod.matchProcess(
-            &self.table,
-            self.config.config,
-            pid,
-            name,
-        );
+        const result = self.matchProcessByNameOrComm(pid, name, comm).result;
 
         if (result.matched()) {
             _ = self.assignTrackedPid(pid, result.profile_idx, false);
@@ -585,18 +583,16 @@ fn handleProcesses(self: *Self) void {
 
 fn reconcileTrackedPidScan(self: *Self, pid: u32, name: []const u8) bool {
     const tracked_idx = self.known_pids.get(pid) orelse return false;
+    const comm_buf = scanner.getProcessComm(pid);
+    const comm = if (comm_buf) |buf| std.mem.sliceTo(&buf, 0) else "";
 
-    if (self.isSystemProcess(name)) {
+    if (self.isSystemProcess(name) or self.isSystemProcess(comm)) {
         _ = self.releaseTrackedPid(pid, false, .scan);
         return false;
     }
 
-    const result = matcher_mod.matchProcess(
-        &self.table,
-        self.config.config,
-        pid,
-        name,
-    );
+    const matched = self.matchProcessByNameOrComm(pid, name, comm);
+    const result = matched.result;
 
     if (!result.matched()) {
         _ = self.releaseTrackedPid(pid, false, .scan);
@@ -608,7 +604,7 @@ fn reconcileTrackedPidScan(self: *Self, pid: u32, name: []const u8) bool {
         .inserted => unreachable,
         .reassigned => log.info("scan rematched pid={d} name='{s}' profile='{s}' -> '{s}'", .{
             pid,
-            name,
+            matched.name,
             self.table.names[tracked_idx].get(),
             self.table.names[result.profile_idx].get(),
         }),
@@ -837,12 +833,35 @@ test "exec rematch updates tracked pid from proton to specific profile" {
     self.active_profile_idx = proton_idx;
     self.active_pid = 4242;
 
-    self.matchAndActivateExec(4242, "Cyberpunk2077.exe");
+    self.matchAndActivateExec(4242, "Cyberpunk2077.exe", "Cyberpunk2077.exe");
 
     try std.testing.expectEqual(@as(?u8, game_idx), self.known_pids.get(4242));
     try std.testing.expectEqual(@as(u16, 0), self.profile_pid_counts[proton_idx]);
     try std.testing.expectEqual(@as(u16, 1), self.profile_pid_counts[game_idx]);
     try std.testing.expectEqual(@as(?u8, game_idx), self.active_profile_idx);
+}
+
+test "exec keeps tracked pid when comm still matches profile" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
+
+    const mock_idx = try self.table.addProfile("mock");
+    self.table.activation[mock_idx].vcache_mode = .none;
+
+    try self.known_pids.put(55762, mock_idx);
+    self.profile_pid_counts[mock_idx] = 1;
+    self.active_profile_idx = mock_idx;
+    self.active_pid = 55762;
+
+    self.matchAndActivateExec(55762, "python3", "mock");
+
+    try std.testing.expectEqual(@as(?u8, mock_idx), self.known_pids.get(55762));
+    try std.testing.expectEqual(@as(u16, 1), self.profile_pid_counts[mock_idx]);
+    try std.testing.expectEqual(@as(?u8, mock_idx), self.active_profile_idx);
+    try std.testing.expectEqual(@as(?i128, null), self.deactivation_deadline);
 }
 
 test "releaseTrackedPid starts grace when active profile drains" {
