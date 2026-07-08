@@ -31,7 +31,7 @@ vcache_mode = none
 profile_mode = none
 ```
 
-This is global configuration and all options other than profile_mode override individual game profiles.
+This is global configuration and all options other than profile_mode override individual game profiles. Global `scx_sched` / `vcache_mode` set at daemon start remain in effect when idle; profile activate/deactivate restores the pre-profile snapshot (typically those globals), not an unset state.
 
 There is also a list of proton/wine system processes in `/usr/share/falcond/system.conf`. This list can be updated if for example a crash handler is intercepting your profile and needs to be ignored.
 
@@ -91,8 +91,8 @@ disable_split_lock = true
 - `scx_sched`: SCX scheduler (options: none, bpfland, lavd, rusty, flash)
 - `scx_sched_props`: SCX scheduler mode (options: none, gaming, power, latency, server)
 - `vcache_mode`: VCache management mode (options: none, cache, freq)
-- `start_script`: Script to run when the game starts
-- `stop_script`: Script to run when the game stops
+- `start_script`: Script to run when the game starts (trusted config: runs via `/bin/sh -c` as the game UID when falcond is root; `DISPLAY` is taken from the game process environ when available, else `:0`)
+- `stop_script`: Script to run when the game stops (same trust model as `start_script`)
 - `idle_inhibit`: Prevent screensaver/idle while game is running (default: false)
 - `dmem_protect`: Move matched profile processes into a falcond-managed child cgroup and protect their GPU/device memory with `dmem.low` while active (default: false)
 - `disable_split_lock`: Temporarily set `kernel.split_lock_mitigate=0` while the profile is active, then restore the previous value on exit (default: false). Useful for games that misbehave under the kernel's split-lock "misery mode" (e.g. Space Marine 2). Requires root (falcond runs as a system daemon).
@@ -113,7 +113,7 @@ sudo systemctl status falcond
 
 ## Monitoring
 
-You can check the detailed status of falcond by reading the status file (it is also available in /tmp/falcond-status for apps like mangohud):
+You can check the detailed status of falcond by reading the status file (it is also available in /tmp/falcond_status for apps like mangohud):
 
 ```bash
 cat /var/lib/falcond/status
@@ -222,7 +222,7 @@ All file paths are configurable at build time via `-D` flags. These are comptime
 | `-Duser-profiles-dir` | `/usr/share/falcond/profiles/user` | Path to user profile overrides |
 | `-Dsystem-conf-path` | `/usr/share/falcond/system.conf` | Path to the system process list |
 | `-Dstatus-file` | `/var/lib/falcond/status` | Path to the persistent status file (parent directory is created automatically) |
-| `-Dtmp-status-file` | `/tmp/falcond_status` | Path to the tmpfs status file |
+| `-Dtmp-status-file` | `/tmp/falcond_status` | Path to the tmpfs status file (3rd-party contract; atomic rename) |
 
 Example building with custom paths:
 ```

@@ -22,9 +22,11 @@ pub const user_profiles_dir = config_mod.user_profiles_dir;
 pub fn FixedStr(comptime max_len: usize) type {
     return struct {
         const Self = @This();
+        // u16 covers max_script_len (512); u8 overflowed for scripts >= 256 bytes.
+        const Len = if (max_len <= std.math.maxInt(u8)) u8 else u16;
 
         data: [max_len]u8 = undefined,
-        len: u8 = 0,
+        len: Len = 0,
 
         pub fn set(self: *Self, value: []const u8) void {
             const clamped = @min(value.len, max_len);
@@ -368,6 +370,15 @@ test "UserProfileConfig disable_split_lock only overrides when present" {
 
     if (present.disable_split_lock) |v| act.disable_split_lock = v;
     try std.testing.expectEqual(false, act.disable_split_lock);
+}
+
+test "FixedStr stores scripts longer than 255 bytes" {
+    var script: [300]u8 = undefined;
+    @memset(&script, 'x');
+    var s = FixedStr(max_script_len){};
+    s.set(&script);
+    try std.testing.expectEqual(@as(usize, 300), s.get().len);
+    try std.testing.expectEqual(@as(u8, 'x'), s.get()[299]);
 }
 
 test "ProfileConfig can enable dmem_protect" {

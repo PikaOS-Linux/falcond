@@ -262,6 +262,42 @@ pub fn findUserForProcess(pid: u32) ?u32 {
     return std.fmt.parseInt(u32, real_uid_str, 10) catch null;
 }
 
+// ---------------------------------------------------------------------------
+// findDisplayForProcess — read DISPLAY from /proc/PID/environ
+// ---------------------------------------------------------------------------
+
+pub fn findDisplayForProcess(pid: u32) ?[]const u8 {
+    // Static buffer: environ values are short; callers must use before next call.
+    const EnvBuf = struct {
+        var buf: [128]u8 = undefined;
+    };
+
+    var path_buf: [48]u8 = undefined;
+    const path = std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{d}/environ", .{pid}) catch return null;
+    const fd = posix.openat(proc_dir_fd, path, .{}, 0) catch return null;
+    defer _ = posix.system.close(fd);
+
+    var content_buf: [4096]u8 = undefined;
+    const n = posix.read(fd, &content_buf) catch return null;
+    if (n == 0 or n > content_buf.len) return null;
+    const content = content_buf[0..@intCast(n)];
+
+    var start: usize = 0;
+    while (start < content.len) {
+        const end = std.mem.indexOfScalarPos(u8, content, start, 0) orelse content.len;
+        const entry = content[start..end];
+        if (std.mem.startsWith(u8, entry, "DISPLAY=")) {
+            const value = entry["DISPLAY=".len..];
+            if (value.len == 0 or value.len >= EnvBuf.buf.len) return null;
+            @memcpy(EnvBuf.buf[0..value.len], value);
+            return EnvBuf.buf[0..value.len];
+        }
+        if (end >= content.len) break;
+        start = end + 1;
+    }
+    return null;
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================

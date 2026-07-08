@@ -121,14 +121,6 @@ pub fn hasChanged(path: []const u8, last_mtime_ns: i128) !bool {
     return otter_conf.hasChanged(path, last_mtime_ns);
 }
 
-/// Check if a directory's mtime has changed. Returns the new mtime, or null on error.
-pub fn dirMtime(path: []const u8) ?i128 {
-    var dir = std.Io.Dir.openDirAbsolute(io_global(), path, .{}) catch return null;
-    defer dir.close(io_global());
-    const stat = dir.stat(io_global()) catch return null;
-    return stat.mtime;
-}
-
 /// Returns the profile loading directory based on mode.
 /// .none => base_path, .handheld => base_path/handheld, .htpc => base_path/htpc
 pub fn profilesDirForMode(allocator: std.mem.Allocator, base_path: []const u8, mode: ProfileMode) ![]const u8 {

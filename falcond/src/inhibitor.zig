@@ -59,10 +59,12 @@ pub fn inhibit(self: *Self, app_name: []const u8, reason: []const u8, pid: u32) 
 
 pub fn uninhibit(self: *Self) void {
     if (self.dbus_cookie) |cookie| {
-        self.uninhibitDBus(cookie) catch |err| {
+        if (self.uninhibitDBus(cookie)) |_| {
+            self.dbus_cookie = null;
+        } else |err| {
             log.warn("busctl screensaver uninhibit failed: {}", .{err});
-        };
-        self.dbus_cookie = null;
+            // Keep cookie so a later uninhibit (or deinit) can retry.
+        }
     }
 
     if (self.systemd_pid) |pid| {
@@ -77,7 +79,10 @@ pub fn uninhibit(self: *Self) void {
         self.systemd_pid = null;
     }
 
-    self.target_uid = null;
+    // Only clear target_uid once D-Bus cookie is gone (needed for retry).
+    if (self.dbus_cookie == null) {
+        self.target_uid = null;
+    }
 }
 
 pub fn isInhibited(self: *const Self) bool {

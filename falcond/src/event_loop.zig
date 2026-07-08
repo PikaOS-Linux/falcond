@@ -100,7 +100,6 @@ signal_fd: posix.fd_t,
 watcher: otter_utils.inotify.Watcher,
 netlink_fd: ?posix.fd_t,
 tracked_pids: ?*std.AutoHashMap(u32, u8) = null,
-profile_pid_counts: ?*[@import("profiles.zig").max_profiles]u16 = null,
 
 // ── Init / Deinit ───────────────────────────────────────────────────────────
 
@@ -238,7 +237,9 @@ fn drainSignals(self: *Self, events: *EventList) void {
             .signal_hup
         else
             null;
-        if (event) |ev| events.append(ev) catch {};
+        if (event) |ev| events.append(ev) catch {
+            log.warn("event list full, dropping signal event", .{});
+        };
     }
 }
 
@@ -248,7 +249,9 @@ fn drainInotify(self: *Self, events: *EventList) void {
         saw_change = true;
     }
     if (saw_change) {
-        events.append(.config_changed) catch {};
+        events.append(.config_changed) catch {
+            log.warn("event list full, dropping config_changed", .{});
+        };
     }
 }
 
@@ -312,7 +315,9 @@ fn handleForkProcEvent(
         if (child_tgid == parent_tgid) return;
 
         if (pids.contains(parent_tgid)) {
-            events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {};
+            events.append(.{ .proc_fork = .{ .parent = parent_tgid, .child = child_tgid } }) catch {
+                log.warn("event list full, dropping proc_fork parent={d} child={d}", .{ parent_tgid, child_tgid });
+            };
         }
     }
 }
@@ -330,7 +335,9 @@ fn handleExecProcEvent(
 
     const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
     if (tgid > 2) {
-        events.append(.{ .proc_exec = tgid }) catch {};
+        events.append(.{ .proc_exec = tgid }) catch {
+            log.warn("event list full, dropping proc_exec pid={d}", .{tgid});
+        };
     }
 }
 
@@ -348,7 +355,9 @@ fn handleExitProcEvent(
     const pid = std.mem.readInt(u32, buf[event_data_offset..][0..4], .little);
     const tgid = std.mem.readInt(u32, buf[tgid_offset..][0..4], .little);
     if (pid == tgid) {
-        events.append(.{ .proc_exit = tgid }) catch {};
+        events.append(.{ .proc_exit = tgid }) catch {
+            log.warn("event list full, dropping proc_exit pid={d}", .{tgid});
+        };
     }
 }
 
@@ -428,16 +437,12 @@ test "handleForkProcEvent queues fork event without inheriting child tracking" {
 
     try tracked.put(111, 3);
 
-    var counts = [_]u16{0} ** @import("profiles.zig").max_profiles;
-    counts[3] = 1;
-
     var loop = Self{
         .epoll_fd = undefined,
         .signal_fd = undefined,
         .watcher = undefined,
         .netlink_fd = null,
         .tracked_pids = &tracked,
-        .profile_pid_counts = &counts,
     };
 
     var events = EventList{};
@@ -451,21 +456,18 @@ test "handleForkProcEvent queues fork event without inheriting child tracking" {
     try std.testing.expectEqual(Event{ .proc_fork = .{ .parent = 111, .child = 222 } }, events.constSlice()[0]);
     try std.testing.expectEqual(@as(?u8, 3), tracked.get(111));
     try std.testing.expectEqual(@as(?u8, null), tracked.get(222));
-    try std.testing.expectEqual(@as(u16, 1), counts[3]);
 }
 
 test "handleForkProcEvent ignores untracked parent" {
     var tracked = std.AutoHashMap(u32, u8).init(std.testing.allocator);
     defer tracked.deinit();
 
-    var counts = [_]u16{0} ** @import("profiles.zig").max_profiles;
     var loop = Self{
         .epoll_fd = undefined,
         .signal_fd = undefined,
         .watcher = undefined,
         .netlink_fd = null,
         .tracked_pids = &tracked,
-        .profile_pid_counts = &counts,
     };
 
     var events = EventList{};

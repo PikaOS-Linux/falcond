@@ -134,4 +134,6 @@ test {
     _ = @import("dmemcg.zig");
     _ = @import("dmemcg/capacity.zig");
     _ = @import("dmemcg/path.zig");
+    _ = @import("daemon.zig");
+    _ = @import("daemon_actions.zig");
 }
