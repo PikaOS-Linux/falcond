@@ -56,7 +56,8 @@ status_dirty: bool = true,
 oneshot: bool,
 
 const PendingRecheck = struct { pid: u32, deadline_ns: i128, retries: u8 };
-const PendingRechecks = otter_utils.BoundedArray(PendingRecheck, 32);
+// Large enough for Proton/Wine fork storms; queueRecheck also dedups by pid.
+const PendingRechecks = otter_utils.BoundedArray(PendingRecheck, 128);
 const recheck_delay_ns: i128 = 100 * std.time.ns_per_ms;
 const max_rechecks: u8 = 15;
 const deactivation_grace_ns: i128 = 3000 * std.time.ns_per_ms;
@@ -290,9 +291,22 @@ fn isWinePreloader(name: []const u8) bool {
 }
 
 fn queueRecheck(self: *Self, pid: u32, retries: u8) void {
+    // Already tracked — no deferred rematch needed.
+    if (self.known_pids.contains(pid)) return;
+
     const deadline = daemon_time.nowNs() + recheck_delay_ns;
+    // Dedup: refresh existing entry instead of stacking duplicates (fork storms).
+    for (0..self.pending_rechecks.len) |i| {
+        const entry = &self.pending_rechecks.buffer[i];
+        if (entry.pid == pid) {
+            entry.deadline_ns = deadline;
+            if (retries > entry.retries) entry.retries = retries;
+            return;
+        }
+    }
+
     self.pending_rechecks.append(.{ .pid = pid, .deadline_ns = deadline, .retries = retries }) catch {
-        log.warn("pending recheck queue full, dropping pid={d}", .{pid});
+        log.debug("pending recheck queue full, dropping pid={d}", .{pid});
     };
 }
 
@@ -304,11 +318,11 @@ fn processPendingRechecks(self: *Self) void {
     for (self.pending_rechecks.constSlice()) |entry| {
         if (now < entry.deadline_ns) {
             kept.append(entry) catch {
-                log.warn("pending recheck queue full while compacting", .{});
+                log.debug("pending recheck queue full while compacting", .{});
             };
         } else {
             due.append(entry) catch {
-                log.warn("pending recheck due-list full, dropping pid={d}", .{entry.pid});
+                log.debug("pending recheck due-list full, dropping pid={d}", .{entry.pid});
             };
         }
     }
@@ -921,6 +935,23 @@ test "wine preloader requeue survives pending compact" {
     self.queueRecheck(99, 1);
     try std.testing.expectEqual(before + 1, self.pending_rechecks.len);
     try std.testing.expectEqual(@as(u32, 99), self.pending_rechecks.constSlice()[before].pid);
+}
+
+test "queueRecheck dedups pid and skips already tracked" {
+    var map = std.AutoHashMap(u32, u8).init(std.testing.allocator);
+    defer map.deinit();
+
+    var self = initTestDaemon(map);
+    defer deinitTestDaemon(&self);
+
+    self.queueRecheck(42, 2);
+    self.queueRecheck(42, 5);
+    try std.testing.expectEqual(@as(usize, 1), self.pending_rechecks.len);
+    try std.testing.expectEqual(@as(u8, 5), self.pending_rechecks.constSlice()[0].retries);
+
+    try self.known_pids.put(99, 0);
+    self.queueRecheck(99, 3);
+    try std.testing.expectEqual(@as(usize, 1), self.pending_rechecks.len);
 }
 
 test "releaseTrackedPid starts grace when active profile drains" {
