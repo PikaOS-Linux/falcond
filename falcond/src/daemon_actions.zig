@@ -3,6 +3,7 @@ const otter_utils = @import("otter_utils");
 const otter_desktop = @import("otter_desktop");
 const scanner = @import("scanner.zig");
 const vcache = @import("vcache.zig");
+const splitlock = @import("splitlock.zig");
 const status = @import("status.zig");
 
 const ScxMode = otter_desktop.scx_loader.ScxMode;
@@ -59,13 +60,14 @@ pub fn activateProfile(self: anytype, idx: u8, pid: u32) void {
 
     const act = &self.table.activation[idx];
     const name = self.table.names[idx].get();
-    log.info("activating profile '{s}' (scx={s}, mode={s}, perf={}, vcache={s}, inhibit={})", .{
+    log.info("activating profile '{s}' (scx={s}, mode={s}, perf={}, vcache={s}, inhibit={}, split_lock={})", .{
         name,
         @tagName(act.scx_sched),
         @tagName(act.scx_sched_props),
         act.performance_mode,
         @tagName(act.vcache_mode),
         act.idle_inhibit,
+        act.disable_split_lock,
     });
 
     if (self.power_profiles) |*pp| {
@@ -106,6 +108,21 @@ pub fn activateProfile(self: anytype, idx: u8, pid: u32) void {
         vcache.write(val) catch |err| {
             log.warn("failed to set vcache mode: {}", .{err});
         };
+    }
+
+    // Only disable when we captured a restore value; never write(0) without one.
+    if (act.disable_split_lock) {
+        if (splitlock.read()) |current| {
+            self.restore_split_lock = current;
+            if (current != 0) {
+                splitlock.write(0) catch |err| {
+                    log.warn("failed to disable split_lock_mitigate: {}", .{err});
+                    self.restore_split_lock = null;
+                };
+            }
+        } else {
+            log.warn("split_lock_mitigate unavailable, skipping disable", .{});
+        }
     }
 
     if (act.idle_inhibit) {
@@ -171,6 +188,13 @@ pub fn deactivateProfile(self: anytype, idx: u8) void {
             log.warn("failed to restore vcache mode: {}", .{err});
         };
         self.restore_vcache = null;
+    }
+
+    if (self.restore_split_lock) |val| {
+        splitlock.write(val) catch |err| {
+            log.warn("failed to restore split_lock_mitigate: {}", .{err});
+        };
+        self.restore_split_lock = null;
     }
 
     if (self.inhibitor.isInhibited()) {

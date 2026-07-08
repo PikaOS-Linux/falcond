@@ -8,6 +8,7 @@ const Config = @import("config.zig").Config;
 const Inhibitor = @import("inhibitor.zig");
 const dmemcg = @import("dmemcg.zig");
 const vcache = @import("vcache.zig");
+const splitlock = @import("splitlock.zig");
 const build_options = @import("build_options");
 const log = std.log.scoped(.status);
 inline fn io_global() std.Io { return otter_utils.io.get(); }
@@ -160,6 +161,13 @@ fn writeStatusFile(
             try w.print("  VCache Mode: {s}\n", .{mode});
         } else {
             try w.writeAll("  VCache Mode: N/A\n");
+        }
+
+        // Split Lock Mitigation
+        if (splitlock.read()) |val| {
+            try w.print("  Split Lock Mitigate: {d}\n", .{val});
+        } else {
+            try w.writeAll("  Split Lock Mitigate: N/A\n");
         }
 
         // SCX Scheduler

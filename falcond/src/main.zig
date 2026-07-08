@@ -127,6 +127,7 @@ test {
     _ = @import("scanner.zig");
     _ = @import("matcher.zig");
     _ = @import("vcache.zig");
+    _ = @import("splitlock.zig");
     _ = @import("status.zig");
     _ = @import("inhibitor.zig");
     _ = @import("event_loop.zig");

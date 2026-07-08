@@ -10,6 +10,7 @@ falcond is a powerful system daemon designed to automatically optimize your Linu
 - **3D vcache Management**: Smart management of AMD 3D vcache settings
 - **SCX Scheduler Integration**: Dynamically pick a scheduler that is best for the specific game
 - **DMEM Cgroup Protection**: Optional GPU/device-memory protection for active profiles on supported kernels
+- **Split Lock Mitigation**: Optional per-profile disable of `kernel.split_lock_mitigate` for games that need it
 - **Proton Compatibility**: Full support for Steam Proton games, with a global profile for excellent game coverage
 - **Low Overhead**: Minimal system resource usage
 - **Different Device Modes**: Profiles for desktops, handhelds, HTPC etc
@@ -80,6 +81,7 @@ vcache_mode = cache
 start_script = "/home/ferreo/start.sh"
 stop_script = "notify-send 'game stopped'"
 dmem_protect = true
+disable_split_lock = true
 ```
 
 ### Available Options
@@ -93,6 +95,7 @@ dmem_protect = true
 - `stop_script`: Script to run when the game stops
 - `idle_inhibit`: Prevent screensaver/idle while game is running (default: false)
 - `dmem_protect`: Move matched profile processes into a falcond-managed child cgroup and protect their GPU/device memory with `dmem.low` while active (default: false)
+- `disable_split_lock`: Temporarily set `kernel.split_lock_mitigate=0` while the profile is active, then restore the previous value on exit (default: false). Useful for games that misbehave under the kernel's split-lock "misery mode" (e.g. Space Marine 2). Requires root (falcond runs as a system daemon).
 
 `dmem_protect` requires cgroup v2, a kernel with `CONFIG_CGROUP_DMEM`, a compatible GPU driver, and a hierarchy where the dmem controller can be enabled for the game cgroup. Current systems may require `dmemcg-booster` or equivalent hierarchy preparation. The feature is optional and profiles still activate when dmem is unavailable.
 

@@ -60,6 +60,7 @@ pub const ActivationData = struct {
     stop_script: FixedStr(max_script_len) = .{},
     idle_inhibit: bool = false,
     dmem_protect: bool = false,
+    disable_split_lock: bool = false,
 };
 
 // ── ProfileTable ─────────────────────────────────────────────────────────────
@@ -127,6 +128,7 @@ pub const ProfileConfig = struct {
     stop_script: []const u8 = "",
     idle_inhibit: bool = false,
     dmem_protect: bool = false,
+    disable_split_lock: bool = false,
 };
 
 /// User override variant — optional fields allow partial overrides that
@@ -141,6 +143,7 @@ pub const UserProfileConfig = struct {
     stop_script: ?[]const u8 = null,
     idle_inhibit: ?bool = null,
     dmem_protect: ?bool = null,
+    disable_split_lock: ?bool = null,
 };
 
 // ── loadProfiles ─────────────────────────────────────────────────────────────
@@ -182,6 +185,7 @@ pub fn loadProfiles(allocator: std.mem.Allocator, table: *ProfileTable, dir_path
         act.vcache_mode = cfg.vcache_mode;
         act.idle_inhibit = cfg.idle_inhibit;
         act.dmem_protect = cfg.dmem_protect;
+        act.disable_split_lock = cfg.disable_split_lock;
 
         if (cfg.start_script.len > 0) {
             act.start_script.set(cfg.start_script);
@@ -248,6 +252,7 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
             if (cfg.vcache_mode) |v| act.vcache_mode = v;
             if (cfg.idle_inhibit) |v| act.idle_inhibit = v;
             if (cfg.dmem_protect) |v| act.dmem_protect = v;
+            if (cfg.disable_split_lock) |v| act.disable_split_lock = v;
             if (cfg.start_script) |v| {
                 if (v.len > 0) act.start_script.set(v);
             }
@@ -262,6 +267,7 @@ pub fn loadUserProfiles(allocator: std.mem.Allocator, table: *ProfileTable) !voi
             act.vcache_mode = cfg.vcache_mode orelse .cache;
             act.idle_inhibit = cfg.idle_inhibit orelse false;
             act.dmem_protect = cfg.dmem_protect orelse false;
+            act.disable_split_lock = cfg.disable_split_lock orelse false;
             if (cfg.start_script) |v| {
                 if (v.len > 0) act.start_script.set(v);
             }
@@ -340,6 +346,28 @@ test "ActivationData defaults match old Profile defaults" {
     try std.testing.expectEqual(VCacheMode.cache, act.vcache_mode);
     try std.testing.expectEqual(false, act.idle_inhibit);
     try std.testing.expectEqual(false, act.dmem_protect);
+    try std.testing.expectEqual(false, act.disable_split_lock);
+}
+
+test "ProfileConfig can enable disable_split_lock" {
+    const cfg = ProfileConfig{ .name = "Game.exe", .disable_split_lock = true };
+    var act = ActivationData{};
+
+    act.disable_split_lock = cfg.disable_split_lock;
+
+    try std.testing.expectEqual(true, act.disable_split_lock);
+}
+
+test "UserProfileConfig disable_split_lock only overrides when present" {
+    const absent = UserProfileConfig{ .name = "Game.exe" };
+    const present = UserProfileConfig{ .name = "Game.exe", .disable_split_lock = false };
+    var act = ActivationData{ .disable_split_lock = true };
+
+    if (absent.disable_split_lock) |v| act.disable_split_lock = v;
+    try std.testing.expectEqual(true, act.disable_split_lock);
+
+    if (present.disable_split_lock) |v| act.disable_split_lock = v;
+    try std.testing.expectEqual(false, act.disable_split_lock);
 }
 
 test "ProfileConfig can enable dmem_protect" {
