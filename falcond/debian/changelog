@@ -1,3 +1,9 @@
+falcond (2.0.12-101pika1) pika; urgency=medium
+
+  * feat: add split lock mitigate fixing
+
+ -- ferreo <ferreo@pika-os.com>  Thu, 25 Jun 2026 18:58:09 +0100
+
 falcond (2.0.11-101pika1) pika; urgency=medium
 
   * fix: mock matching
