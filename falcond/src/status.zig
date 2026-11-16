@@ -136,7 +136,7 @@ fn writeStatusFile(
         } else {
             try w.writeAll("  SCX Scheduler: (None)\n");
         }
-        try w.print("  Power Profile: {s}\n", .{restore_power_profile orelse "balanced"});
+        try w.print("  Power Profile: {s}\n", .{restore_power_profile orelse "(None)"});
         try w.writeAll("\n");
     }
 
