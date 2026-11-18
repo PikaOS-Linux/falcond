@@ -199,7 +199,7 @@ Please fork the [PikaOS-Linux/falcond](https://github.com/PikaOS-Linux/falcond) 
 
 ## Build Dependencies
 
-- zig 0.15.1+
+- Zig 0.16.0 or newer
 - libc development headers
 
 ## Building from Source

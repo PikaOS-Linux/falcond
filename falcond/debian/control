@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: ferreo <ferreo@pika-os.com>
 Rules-Requires-Root: no
 Build-Depends:
- debhelper-compat (= 13), zig (>= 0.15.1), git, libc-dev
+ debhelper-compat (= 13), zig (>= 0.16.0), git, libc-dev
 Standards-Version: 4.6.1
 Homepage: https://pika-os.com
 
