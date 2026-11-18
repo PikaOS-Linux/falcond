@@ -83,14 +83,16 @@ pub fn activateProfile(self: anytype, idx: u8, pid: u32) void {
         act.disable_split_lock,
     });
 
-    if (self.power_profiles) |*pp| {
-        if (pp.getActiveProfile()) |p| {
-            self.restore_power_profile = if (std.mem.eql(u8, p, "performance"))
-                "performance"
-            else if (std.mem.eql(u8, p, "power-saver"))
-                "power-saver"
-            else
-                "balanced";
+    if (act.performance_mode) {
+        if (self.power_profiles) |*pp| {
+            if (pp.getActiveProfile()) |p| {
+                self.restore_power_profile = if (std.mem.eql(u8, p, "performance"))
+                    "performance"
+                else if (std.mem.eql(u8, p, "power-saver"))
+                    "power-saver"
+                else
+                    "balanced";
+            }
         }
     }
     if (self.scx_loader) |*scx| {
@@ -288,4 +290,81 @@ pub fn updateStatus(self: anytype) void {
         &self.inhibitor,
         if (self.dmem) |*dmem| dmem else null,
     );
+}
+
+const TestPowerProfiles = struct {
+    active_profile: [:0]const u8 = "power-saver",
+    writes: usize = 0,
+
+    pub fn getActiveProfile(self: *const @This()) ?[]const u8 {
+        return self.active_profile;
+    }
+
+    pub fn setActiveProfile(self: *@This(), profile: [:0]const u8) !void {
+        self.active_profile = profile;
+        self.writes += 1;
+    }
+};
+
+const TestDaemon = struct {
+    allocator: std.mem.Allocator = std.testing.allocator,
+    table: @import("profiles.zig").ProfileTable = @import("profiles.zig").ProfileTable.init(),
+    active_profile_idx: ?u8 = null,
+    active_pid: ?u32 = null,
+    active_uid: ?u32 = null,
+    deactivation_deadline: ?i128 = null,
+    profile_pid_counts: [@import("profiles.zig").max_profiles]u16 = .{0} ** @import("profiles.zig").max_profiles,
+    queued_indices: std.ArrayListUnmanaged(u8) = .empty,
+    known_pids: std.AutoHashMap(u32, u8) = std.AutoHashMap(u32, u8).init(std.testing.allocator),
+    power_profiles: ?TestPowerProfiles = .{},
+    scx_loader: ?otter_desktop.scx_loader.ScxLoader = null,
+    inhibitor: @import("inhibitor.zig") = @import("inhibitor.zig").init(std.testing.allocator),
+    dmem: ?@import("dmemcg.zig").Manager = null,
+    restore_power_profile: ?[:0]const u8 = null,
+    restore_sched: ?[]const u8 = null,
+    restore_mode: ?[]const u8 = null,
+    restore_vcache: ?[]const u8 = null,
+    restore_split_lock: ?u8 = null,
+    status_dirty: bool = false,
+
+    fn deinit(self: *@This()) void {
+        self.table.deinit(self.allocator);
+        self.known_pids.deinit();
+        self.queued_indices.deinit(self.allocator);
+        self.inhibitor.deinit();
+    }
+};
+
+test "disabled performance mode preserves external power profile changes" {
+    var self = TestDaemon{};
+    defer self.deinit();
+    const idx = try self.table.addProfile("game.exe");
+    self.table.activation[idx].vcache_mode = .none;
+
+    activateProfile(&self, idx, 0);
+    // No vcache setting is applied by this profile; avoid restoring host sysfs.
+    self.restore_vcache = null;
+    self.power_profiles.?.active_profile = "balanced";
+    deactivateProfile(&self, idx);
+
+    try std.testing.expectEqualStrings("balanced", self.power_profiles.?.active_profile);
+    try std.testing.expectEqual(@as(usize, 0), self.power_profiles.?.writes);
+    try std.testing.expectEqual(@as(?[:0]const u8, null), self.restore_power_profile);
+}
+
+test "enabled performance mode restores the previous power profile" {
+    var self = TestDaemon{};
+    defer self.deinit();
+    const idx = try self.table.addProfile("game.exe");
+    self.table.activation[idx].performance_mode = true;
+    self.table.activation[idx].vcache_mode = .none;
+
+    activateProfile(&self, idx, 0);
+    self.restore_vcache = null;
+    try std.testing.expectEqualStrings("performance", self.power_profiles.?.active_profile);
+    deactivateProfile(&self, idx);
+
+    try std.testing.expectEqualStrings("power-saver", self.power_profiles.?.active_profile);
+    try std.testing.expectEqual(@as(usize, 2), self.power_profiles.?.writes);
+    try std.testing.expectEqual(@as(?[:0]const u8, null), self.restore_power_profile);
 }
